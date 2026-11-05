@@ -26,9 +26,9 @@ GitHub Pages 只提供靜態 HTML／CSS／JavaScript，不能自己儲存全班�
 1. 登入 [Supabase](https://supabase.com/)，建立新專案。
 2. 等待專案準備完成，開啟 **SQL Editor → New query**。
 3. 把本專案 `supabase-schema.sql` 整份貼上並執行。它會建立資料表、安全函式、隨機分配邏輯及 `artworks` 圖片儲存桶。
-4. 到 **Project Settings → API**（部分介面顯示 **Data API**），複製：
+4. 到 **Connect** 或 **Project Settings → API Keys**，複製：
    - Project URL
-   - `anon` `public` key（不是 `service_role` secret key）
+   - `publishable` key（舊版介面的 legacy `anon` `public` key 亦可；不是 `secret` 或 `service_role` key）
 
 ### 2. 填入網頁設定
 
@@ -37,13 +37,13 @@ GitHub Pages 只提供靜態 HTML／CSS／JavaScript，不能自己儲存全班�
 ```js
 window.APP_CONFIG = {
   SUPABASE_URL: "https://你的專案.supabase.co",
-  SUPABASE_ANON_KEY: "你的 anon public key",
+  SUPABASE_ANON_KEY: "你的 publishable key 或 legacy anon public key",
   POLL_INTERVAL: 10000,
   MAX_IMAGE_MB: 10
 };
 ```
 
-`anon public key` 本来就是供瀏覽器使用的公開金鑰；資料表已停用直接存取，所有操作必須經過 SQL 內的權限及階段檢查。絕對不要把 `service_role` key 放進前端。
+`publishable key`／legacy `anon public key` 本来就是供瀏覽器使用的公開金鑰；資料表已停用直接存取，所有操作必須經過 SQL 內的權限及階段檢查。絕對不要把 `service_role` key 放進前端。
 
 ### 3. 本機測試
 

@@ -16,7 +16,7 @@ create table if not exists public.students (
   class_id uuid not null references public.classes(id) on delete cascade,
   student_no text not null,
   display_name text not null,
-  token text not null unique default encode(gen_random_bytes(24), 'hex'),
+  token text not null unique default encode(extensions.gen_random_bytes(24), 'hex'),
   created_at timestamptz not null default now(),
   last_seen_at timestamptz not null default now(),
   unique(class_id, student_no)
@@ -63,7 +63,7 @@ revoke all on public.classes, public.students, public.rounds, public.artworks, p
 
 -- 原子化截止及分配：鎖定班別，避免多名學生同時重新整理造成重複分配。
 create or replace function public._advance_round(p_class_id uuid, p_force boolean default false)
-returns void language plpgsql security definer set search_path = public, pg_temp as $$
+returns void language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare
   v_round public.rounds%rowtype;
   v_count integer;
@@ -113,7 +113,7 @@ revoke all on function public._advance_round(uuid, boolean) from public, anon, a
 
 create or replace function public.create_class(
   p_class_name text, p_join_code text, p_pin text, p_duration integer default 15
-) returns json language plpgsql security definer set search_path = public, pg_temp as $$
+) returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare v_code text := upper(trim(p_join_code));
 begin
   if length(trim(p_class_name)) < 1 or length(trim(p_class_name)) > 60 then raise exception '班別名稱長度不正確'; end if;
@@ -121,13 +121,13 @@ begin
   if length(p_pin) < 4 or length(p_pin) > 64 then raise exception '老師 PIN 須為 4–64 位'; end if;
   if p_duration not between 1 and 120 then raise exception '時限須為 1–120 分鐘'; end if;
   insert into public.classes(name, join_code, teacher_pin_hash, duration_minutes)
-  values(trim(p_class_name), v_code, crypt(p_pin, gen_salt('bf')), p_duration);
+  values(trim(p_class_name), v_code, extensions.crypt(p_pin, extensions.gen_salt('bf')), p_duration);
   return json_build_object('join_code', v_code);
 end $$;
 
 create or replace function public.join_class(
   p_join_code text, p_student_no text, p_display_name text
-) returns json language plpgsql security definer set search_path = public, pg_temp as $$
+) returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare v_class public.classes%rowtype; v_student public.students%rowtype;
 begin
   select * into v_class from public.classes where join_code = upper(trim(p_join_code));
@@ -142,7 +142,7 @@ begin
 end $$;
 
 create or replace function public.get_student_state(p_token text)
-returns json language plpgsql security definer set search_path = public, pg_temp as $$
+returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare
   v_student public.students%rowtype; v_class public.classes%rowtype; v_round public.rounds%rowtype;
   v_art json; v_assignment json; v_received json;
@@ -178,7 +178,7 @@ end $$;
 
 create or replace function public.submit_artwork(
   p_token text, p_title text, p_image_path text
-) returns json language plpgsql security definer set search_path = public, pg_temp as $$
+) returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare v_student public.students%rowtype; v_class public.classes%rowtype; v_round public.rounds%rowtype; v_art public.artworks%rowtype;
 begin
   select * into v_student from public.students where token=p_token;
@@ -196,7 +196,7 @@ end $$;
 
 create or replace function public.submit_review(
   p_token text, p_appreciation text, p_improvement text
-) returns json language plpgsql security definer set search_path = public, pg_temp as $$
+) returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare v_student public.students%rowtype; v_class public.classes%rowtype; v_round public.rounds%rowtype; v_review public.reviews%rowtype;
 begin
   select * into v_student from public.students where token=p_token;
@@ -215,11 +215,11 @@ begin
 end $$;
 
 create or replace function public.get_teacher_state(p_join_code text, p_pin text)
-returns json language plpgsql security definer set search_path = public, pg_temp as $$
+returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare v_class public.classes%rowtype; v_round public.rounds%rowtype; v_students json;
 begin
   select * into v_class from public.classes where join_code=upper(trim(p_join_code));
-  if not found or v_class.teacher_pin_hash<>crypt(p_pin,v_class.teacher_pin_hash) then raise exception '班別代碼或老師 PIN 不正確'; end if;
+  if not found or v_class.teacher_pin_hash<>extensions.crypt(p_pin,v_class.teacher_pin_hash) then raise exception '班別代碼或老師 PIN 不正確'; end if;
   perform public._advance_round(v_class.id,false);
   if v_class.current_round_id is not null then select * into v_round from public.rounds where id=v_class.current_round_id; end if;
   select coalesce(json_agg(json_build_object(
@@ -239,11 +239,11 @@ begin
 end $$;
 
 create or replace function public.start_round(p_join_code text, p_pin text, p_duration integer default 15)
-returns json language plpgsql security definer set search_path = public, pg_temp as $$
+returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare v_class public.classes%rowtype; v_round public.rounds%rowtype; v_no integer;
 begin
   select * into v_class from public.classes where join_code=upper(trim(p_join_code)) for update;
-  if not found or v_class.teacher_pin_hash<>crypt(p_pin,v_class.teacher_pin_hash) then raise exception '班別代碼或老師 PIN 不正確'; end if;
+  if not found or v_class.teacher_pin_hash<>extensions.crypt(p_pin,v_class.teacher_pin_hash) then raise exception '班別代碼或老師 PIN 不正確'; end if;
   if p_duration not between 1 and 120 then raise exception '時限須為 1–120 分鐘'; end if;
   if v_class.current_round_id is not null then
     select * into v_round from public.rounds where id=v_class.current_round_id;
@@ -257,21 +257,21 @@ begin
 end $$;
 
 create or replace function public.close_submissions(p_join_code text, p_pin text)
-returns json language plpgsql security definer set search_path = public, pg_temp as $$
+returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare v_class public.classes%rowtype;
 begin
   select * into v_class from public.classes where join_code=upper(trim(p_join_code));
-  if not found or v_class.teacher_pin_hash<>crypt(p_pin,v_class.teacher_pin_hash) then raise exception '班別代碼或老師 PIN 不正確'; end if;
+  if not found or v_class.teacher_pin_hash<>extensions.crypt(p_pin,v_class.teacher_pin_hash) then raise exception '班別代碼或老師 PIN 不正確'; end if;
   perform public._advance_round(v_class.id,true);
   return json_build_object('ok',true);
 end $$;
 
 create or replace function public.complete_round(p_join_code text, p_pin text)
-returns json language plpgsql security definer set search_path = public, pg_temp as $$
+returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare v_class public.classes%rowtype;
 begin
   select * into v_class from public.classes where join_code=upper(trim(p_join_code));
-  if not found or v_class.teacher_pin_hash<>crypt(p_pin,v_class.teacher_pin_hash) then raise exception '班別代碼或老師 PIN 不正確'; end if;
+  if not found or v_class.teacher_pin_hash<>extensions.crypt(p_pin,v_class.teacher_pin_hash) then raise exception '班別代碼或老師 PIN 不正確'; end if;
   update public.rounds set status='complete' where id=v_class.current_round_id and status='reviewing';
   return json_build_object('ok',true);
 end $$;

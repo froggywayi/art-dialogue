@@ -138,7 +138,7 @@
     try{
       const result=LIVE?await rpc('join_class',{p_join_code:classCode,p_student_no:studentNo,p_display_name:name}):demoJoin(classCode,studentNo,name);
       state.session={role:'student',classCode,studentNo,name:result.display_name||name,token:result.token};saveSession();
-      state.view='student';state.lastSignature='';state.file=null;state.preview='';
+      state.view='student';state.lastSignature='';state.file=null;state.preview='';restartPolling();
       await refreshStudent();toast('已恢復你的學習紀錄。');
     }catch(e){state.error=e.message;render();}finally{setLoading(false);}
   }
@@ -148,7 +148,7 @@
     setLoading(true);state.error='';
     try{
       if(LIVE)await rpc('get_teacher_state',{p_join_code:classCode,p_pin:pin});else demoTeacherState(classCode,pin);
-      state.session={role:'teacher',classCode,pin};saveSession();state.view='teacher';state.demoTeacher=false;state.lastTeacherSignature='';
+      state.session={role:'teacher',classCode,pin};saveSession();state.view='teacher';state.demoTeacher=false;state.lastTeacherSignature='';restartPolling();
       await refreshTeacher();toast('已進入老師控制台。');
     }catch(e){state.error=e.message;render();}finally{setLoading(false);}
   }
@@ -159,7 +159,7 @@
     try{
       if(LIVE)await rpc('create_class',{p_class_name:name,p_join_code:classCode,p_pin:pin,p_duration:duration});
       else{const d=demoDB();if(d.classes.some(c=>c.join_code===classCode))throw new Error('這個班別代碼已被使用。');d.classes.push({id:'demo-class-'+uid(),name,join_code:classCode,teacher_pin:pin,duration_minutes:duration,current_round_id:null});saveDemo(d);}
-      state.session={role:'teacher',classCode,pin};saveSession();state.view='teacher';state.lastTeacherSignature='';await refreshTeacher();toast('班別已建立，現在可開始第一輪活動。');
+      state.session={role:'teacher',classCode,pin};saveSession();state.view='teacher';state.lastTeacherSignature='';restartPolling();await refreshTeacher();toast('班別已建立，現在可開始第一輪活動。');
     }catch(e){state.error=e.message;render();}finally{setLoading(false);}
   }
   async function startRound(){
