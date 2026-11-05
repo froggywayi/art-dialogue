@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3eee5">
+  <meta name="description" content="藝述互評：限時上載作品、隨機匿名互評，讓每件作品得到具體而善意的回應。">
+  <title>藝述互評｜作品，值得被認真看見</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至主要內容</a>
+  <header class="site-header" id="site-header">
+    <button class="brand" data-action="go-home" aria-label="返回藝述互評首頁">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M7 9h20v20H7z"/><path d="M13 15h20v20H13z"/><path d="M12 24c5-7 10-7 15 0"/></svg>
+      <span><strong>藝述</strong><small>ART DIALOGUE</small></span>
+    </button>
+    <div class="header-actions">
+      <span id="connection-badge" class="connection-badge demo"><i></i>本機示範</span>
+      <button class="text-button" data-action="show-guide">使用指南</button>
+      <button class="outline-button compact" data-action="teacher-entry">老師模式 <span aria-hidden="true">↗</span></button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1"></main>
+
+  <footer class="site-footer" id="site-footer">
+    <span>藝述互評 · 讓觀看成為創作的一部分</span>
+    <span>電腦及 iPad 適用</span>
+  </footer>
+
+  <dialog id="guide-dialog" class="guide-dialog" aria-labelledby="guide-title">
+    <button class="dialog-close" data-action="close-guide" aria-label="關閉使用指南">×</button>
+    <p class="eyebrow">HOW IT WORKS</p>
+    <h2 id="guide-title">一次完整的作品對話</h2>
+    <ol class="guide-list">
+      <li><span>01</span><div><strong>限時上載</strong><p>老師開始活動後，在倒數結束前上載一張作品圖片。遞交後會永久保存目前階段。</p></div></li>
+      <li><span>02</span><div><strong>隨機互評</strong><p>截止後系統自動分配另一位同學的作品，不會分到自己的作品。填寫「欣賞的地方」及「不足與改善方案」。</p></div></li>
+      <li><span>03</span><div><strong>收回意見</strong><p>同學遞交意見後，原作者即可在自己的頁面閱讀。未完成的意見草稿會保存在目前裝置。</p></div></li>
+    </ol>
+    <div class="guide-note"><strong>關閉頁面也不用擔心</strong><p>再次以相同班別代碼及學生編號進入，即可恢復已上載作品、互評及收到的意見。雲端模式需保持網絡連線。</p></div>
+    <button class="primary-button full" data-action="close-guide">明白了</button>
+  </dialog>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="app.js"></script>
+</body>
+</html>
