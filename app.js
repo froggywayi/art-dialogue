@@ -13,8 +13,16 @@
   const initial = name => [...String(name||'同').trim()][0] || '同';
   const safeParse = (s, fallback=null) => { try{return JSON.parse(s)}catch{return fallback} };
   const store = { get:(k,f=null)=>{const raw=localStorage.getItem(k);return raw===null?f:safeParse(raw,f);}, set:(k,v)=>localStorage.setItem(k,JSON.stringify(v)), remove:k=>localStorage.removeItem(k) };
+  const REVIEW_FIELDS = [
+    {key:'fusion',title:'融合手法',question:'傳統與現代元素的比例是否平衡？',help:'作品是否看起來太像純粹的「古裝劇戲服」？還是太像「普通現代衫印個圖案」？',placeholder:'例如：傳統雲肩與現代短版剪裁融合自然，因為……',chips:['平衡自然','偏重古典','偏重現代']},
+    {key:'proportion',title:'剪裁比例',question:'腰線或視覺重心清不清楚？',help:'整體的剪裁線條有沒有做到「上窄下寬」、「外鬆內緊」或「長短不對稱」等現代美感？',placeholder:'例如：腰線位置清楚，上緊下鬆的比例令……',chips:['比例鮮明','成功運用現代剪裁—上緊下鬆','成功運用現代剪裁—短版露腰','成功運用現代剪裁—前短後長','成功運用現代剪裁—不對稱設計','規整傳統','可嘗試更大膽的剪裁突破']},
+    {key:'focus',title:'視覺焦點',question:'全身有沒有 1 至 2 個最吸引眼球的設計焦點？',help:'例如特色領口、腰封、雲肩，或不同布料的軟硬、厚薄對比。',placeholder:'例如：腰封是最搶眼的視覺主角，因為……',chips:['焦點突出','全身有……這個搶眼的視覺主角','能從線條看出軟硬材質對比','能從線條看出厚薄材質對比','元素過滿','有大量花紋或細節','視覺略顯擁擠，缺少留白','略顯單調','線條乾淨簡約']},
+    {key:'communication',title:'設計圖的傳意',question:'線條是否清晰交代了衣服的結構？',help:'怎樣穿脫、拼接位在哪裡？可建議加上文字標註或局部放大圖，幫助理解不清楚的部分。',placeholder:'例如：拼接線條清楚；如加上背面局部放大圖，會更易理解……',chips:['清晰專業','線條清楚','附有局部放大圖','附有材質標註','尚待補充','整體構想不錯，但……部分結構尚未交代清楚','整體構想不錯，但……部分布料材質未交代清楚']}
+  ];
+  const emptyDraft=()=>Object.fromEntries(REVIEW_FIELDS.map(f=>[f.key,'']));
+  const peerValue=(rec,key)=>rec?.[key]||((key==='fusion'?rec?.appreciation:key==='proportion'?rec?.improvement:'')||'');
   const state = { view:'home', homeMode:'student', session:store.get(KEYS.session), data:null, teacherData:null,
-    loading:false, error:'', file:null, preview:'', draft:{appreciation:'',improvement:''}, draftKey:'', lastSignature:'', lastTeacherSignature:'', demoTeacher:false, replacing:false };
+    loading:false, error:'', file:null, preview:'', draft:emptyDraft(), draftKey:'', lastSignature:'', lastTeacherSignature:'', demoTeacher:false, replacing:false, ai:{key:'',status:'idle',error:''} };
   let pollTimer=null, countdownTimer=null, draftTimer=null, objectUrl=null;
 
   function toast(message, type='success') {
@@ -34,14 +42,14 @@
   }
   function loadDraft(){
     state.draftKey=draftStorageKey(); const all=store.get(KEYS.draft,{});
-    state.draft=all[state.draftKey]||{appreciation:'',improvement:''};
+    state.draft={...emptyDraft(),...(all[state.draftKey]||{})};
   }
   function saveDraft(immediate=false){
     clearTimeout(draftTimer);
     const write=()=>{if(!state.draftKey)return;const all=store.get(KEYS.draft,{});all[state.draftKey]={...state.draft,updatedAt:nowISO()};store.set(KEYS.draft,all);const e=$('.draft-status');if(e)e.textContent='草稿已保存在此裝置 · '+new Date().toLocaleTimeString('zh-HK',{hour:'2-digit',minute:'2-digit'});};
     if(immediate)write();else draftTimer=setTimeout(write,450);
   }
-  function clearDraft(){const all=store.get(KEYS.draft,{});delete all[state.draftKey];store.set(KEYS.draft,all);state.draft={appreciation:'',improvement:''};}
+  function clearDraft(){const all=store.get(KEYS.draft,{});delete all[state.draftKey];store.set(KEYS.draft,all);state.draft=emptyDraft();}
 
   // ----- 本機示範資料（明確與雲端正式模式分開） -----
   function sampleArt(n){
@@ -75,7 +83,7 @@
     shuffled.forEach((a,i)=>{
       if(d.reviews.some(x=>x.artwork_id===a.id))return;
       const reviewer=shuffled[(i+1)%shuffled.length].student_id;
-      d.reviews.push({id:uid(),round_id:r.id,artwork_id:a.id,reviewer_id:reviewer,appreciation:'',improvement:'',submitted_at:null});
+      d.reviews.push({id:uid(),round_id:r.id,artwork_id:a.id,reviewer_id:reviewer,...emptyDraft(),ai_fusion:'',ai_proportion:'',ai_focus:'',ai_communication:'',ai_generated_at:null,submitted_at:null});
     });r.status='reviewing';
   }
   function demoStudentState(session){
@@ -106,6 +114,26 @@
 
   // ----- 雲端 API -----
   async function rpc(name,args){const{data,error}=await db.rpc(name,args);if(error)throw new Error(error.message);return data;}
+  function maybeGenerateAI(data){
+    const rec=data?.received;if(!LIVE||!rec?.submitted_at)return;
+    const key=rec.id||rec.submitted_at;
+    if(rec.ai_generated_at){if(state.ai.key!==key||state.ai.status!=='done')state.ai={key,status:'done',error:''};return;}
+    if(state.ai.key===key&&['loading','error'].includes(state.ai.status))return;
+    generateAI(key);
+  }
+  async function generateAI(key){
+    const rec=state.data?.received;if(!rec||rec.ai_generated_at)return;
+    state.ai={key:key||rec.id||rec.submitted_at,status:'loading',error:''};render();
+    try{
+      const response=await fetch(`${CFG.SUPABASE_URL.replace(/\/$/,'')}/functions/v1/generate-feedback`,{method:'POST',headers:{'Content-Type':'application/json','apikey':CFG.SUPABASE_ANON_KEY},body:JSON.stringify({token:state.session.token})});
+      const result=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(result.error||'AI 建議暫時未能生成，請稍後重試。');
+      if(result.status==='generating'){
+        state.ai.status='waiting';render();setTimeout(()=>{if(state.view==='student')refreshStudent(true);},5000);return;
+      }
+      state.ai.status='done';state.lastSignature='';await refreshStudent();
+    }catch(e){state.ai={key:key||rec.id||rec.submitted_at,status:'error',error:e.message};render();}
+  }
   async function refreshStudent(silent=false){
     if(!state.session||state.session.role!=='student')return;
     if(!silent)setLoading(true);
@@ -116,6 +144,7 @@
       if(signature!==state.lastSignature){state.lastSignature=signature;loadDraft();render();}
       else updateTimer();
       state.error='';
+      if(data.received?.submitted_at&&!data.received?.ai_generated_at&&state.ai.status!=='loading')queueMicrotask(()=>maybeGenerateAI(data));
     }catch(e){if(!silent){state.error=e.message;render();}else toast('暫時未能更新雲端紀錄，會自動重試。','error');}
     finally{if(!silent)setLoading(false);}
   }
@@ -215,20 +244,35 @@
     }catch(e){toast(e.message,'error');}finally{setLoading(false);}
   }
   async function submitReview(){
-    const a=state.draft.appreciation.trim(),i=state.draft.improvement.trim();
-    if(a.length<2||i.length<2){toast('請完成兩部分意見，每部分至少輸入 2 個字。','error');return;}
-    if(!confirm('遞交後不能修改意見。確定送給這位同學？'))return;
+    const values=Object.fromEntries(REVIEW_FIELDS.map(f=>[f.key,state.draft[f.key].trim()]));
+    const missing=REVIEW_FIELDS.find(f=>values[f.key].length<2);
+    if(missing){toast(`請完成「${missing.title}」的意見，可選字詞或自行填寫。`,'error');document.getElementById(missing.key)?.focus();return;}
+    if(!confirm('遞交後不能修改四部分意見。確定送給這位同學？'))return;
     setLoading(true);
     try{
-      if(LIVE)await rpc('submit_review',{p_token:state.session.token,p_appreciation:a,p_improvement:i});
+      if(LIVE)await rpc('submit_review_v2',{p_token:state.session.token,p_fusion:values.fusion,p_proportion:values.proportion,p_focus:values.focus,p_communication:values.communication});
       else{
         const d=demoDB(),s=d.students.find(x=>x.token===state.session.token),c=d.classes.find(x=>x.join_code===state.session.classCode),r=d.rounds.find(x=>x.id===c.current_round_id);
-        const rev=d.reviews.find(x=>x.round_id===r.id&&x.reviewer_id===s.id);if(!rev)throw new Error('找不到互評作品。');rev.appreciation=a;rev.improvement=i;rev.submitted_at=nowISO();
+        const rev=d.reviews.find(x=>x.round_id===r.id&&x.reviewer_id===s.id);if(!rev)throw new Error('找不到互評作品。');Object.assign(rev,values,{submitted_at:nowISO()});
         const mine=d.artworks.find(x=>x.round_id===r.id&&x.student_id===s.id);
-        if(mine){let incoming=d.reviews.find(x=>x.artwork_id===mine.id);if(!incoming){const bot=d.students.find(x=>x.id.startsWith('bot-'));incoming={id:uid(),round_id:r.id,artwork_id:mine.id,reviewer_id:bot.id};d.reviews.push(incoming);}incoming.appreciation='你很大膽地安排畫面的主次，色彩之間有清楚的呼應，讓人的目光自然落在最重要的部分。';incoming.improvement='背景部分略為搶眼，可以試着降低背景的對比度，並在主體邊緣保留多一點留白，令層次更清楚。';incoming.submitted_at=nowISO();}
+        if(mine){
+          let incoming=d.reviews.find(x=>x.artwork_id===mine.id);
+          if(!incoming){const bot=d.students.find(x=>x.id.startsWith('bot-'));incoming={id:uid(),round_id:r.id,artwork_id:mine.id,reviewer_id:bot.id};d.reviews.push(incoming);}
+          Object.assign(incoming,{
+            fusion:'傳統雲肩與現代短版剪裁平衡自然，古典元素沒有蓋過整體的現代感。',
+            proportion:'上緊下鬆的比例鮮明，腰線位置清楚；下擺亦可嘗試更長短不對稱的變化。',
+            focus:'腰封是搶眼的視覺主角，能從線條看出軟硬材質對比；袖口細節略多，可保留多一點留白。',
+            communication:'整體線條清楚並附有材質標註，但背面的拼接結構尚未交代清楚。',
+            ai_fusion:'下一稿可保留雲肩作為傳統識別，再把衣身簡化成乾淨的現代直線，讓兩種語言主次更清楚。',
+            ai_proportion:'可先把腰線略為提高，並比較兩個下擺長度版本；用相同站姿畫出比例草圖，會更容易判斷視覺重心。',
+            ai_focus:'建議只保留腰封與領口兩個焦點，把袖口一組裝飾減半。再以軟薄內搭配挺硬腰封，強化材質層次。',
+            ai_communication:'可在背面增加局部放大圖，以虛線及箭嘴標示開合位置和拼接次序，並補上各裁片的布料名稱。',
+            ai_generated_at:nowISO(),ai_model:'本機示範建議',submitted_at:nowISO()
+          });
+        }
         saveDemo(d);
       }
-      clearDraft();state.lastSignature='';await refreshStudent();toast('意見已遞交，原作者現在可以閱讀。');
+      clearDraft();state.lastSignature='';await refreshStudent();toast('四部分意見已遞交，原作者現在可以閱讀。');
     }catch(e){toast(e.message,'error');}finally{setLoading(false);}
   }
 
@@ -243,7 +287,7 @@
       <section class="entry-panel" aria-label="進入系統"><div class="mode-tabs" role="tablist"><button class="mode-tab ${!teacher?'active':''}" data-action="home-student" role="tab" aria-selected="${!teacher}">學生進入</button><button class="mode-tab ${teacher?'active':''}" data-action="home-teacher" role="tab" aria-selected="${teacher}">老師入口</button></div>
       ${teacher?teacherEntryForm():studentEntryForm()}</section>
     </div>
-    <section class="process-strip" aria-label="活動流程"><div class="process-item"><span>01</span><div><strong>上載自己的作品</strong><p>老師啟動倒數，截止前遞交一張圖片。</p></div></div><div class="process-item"><span>02</span><div><strong>為同學留下回應</strong><p>隨機匿名分配，填寫欣賞與改善方案。</p></div></div><div class="process-item"><span>03</span><div><strong>帶着意見再出發</strong><p>原作者收回具體回饋，階段自動保存。</p></div></div></section>`;
+    <section class="process-strip" aria-label="活動流程"><div class="process-item"><span>01</span><div><strong>上載自己的作品</strong><p>老師啟動倒數，截止前遞交一張圖片。</p></div></div><div class="process-item"><span>02</span><div><strong>為同學留下回應</strong><p>隨機匿名分配，以四個角度回應服裝設計。</p></div></div><div class="process-item"><span>03</span><div><strong>帶着意見再出發</strong><p>原作者收回具體回饋，階段自動保存。</p></div></div></section>`;
   }
   function studentEntryForm(){return `<h2>回到你的作品對話</h2><p class="panel-intro">使用相同資料進入，即可接回上次的進度。</p>${errorHTML()}<form id="student-login-form"><div class="field"><label for="classCode">班別代碼</label><input class="input-code" id="classCode" name="classCode" autocomplete="username" placeholder="例如 ART3A" maxlength="12" required></div><div class="form-row"><div class="field"><label for="studentNo">學生編號</label><input id="studentNo" name="studentNo" inputmode="numeric" placeholder="例如 08" maxlength="20" required></div><div class="field"><label for="displayName">姓名</label><input id="displayName" name="displayName" autocomplete="name" placeholder="你的姓名" maxlength="40" required></div></div><button class="primary-button full" type="submit">進入／恢復紀錄 <span aria-hidden="true">→</span></button><p class="form-note">系統會保存已上載的作品、互評狀態和收到的意見；未遞交草稿會保存在此裝置。</p></form>${!LIVE?`<div class="demo-strip">想快速體驗？<button data-action="fill-demo-student">填入學生示範資料</button><div class="demo-credentials">班別代碼 <strong>DEMO15</strong> · 學生編號可自訂<br>內置三份示例作品，方便測試隨機互評。</div></div>`:''}`;}
   function teacherEntryForm(){return `<h2>建立及主持互評</h2><p class="panel-intro">開始倒數、查看遞交狀態，或提前截止分配。</p>${errorHTML()}<div class="mode-tabs" style="margin-bottom:22px"><button class="mode-tab ${!state.demoTeacher?'active':''}" data-action="teacher-login-tab">管理現有班別</button><button class="mode-tab ${state.demoTeacher?'active':''}" data-action="teacher-create-tab">建立新班別</button></div>${state.demoTeacher?`<form id="create-class-form"><div class="field"><label for="className">班別名稱</label><input id="className" name="className" placeholder="例如 三甲視覺藝術" maxlength="60" required></div><div class="form-row"><div class="field"><label for="classCode">班別代碼</label><input class="input-code" id="classCode" name="classCode" value="ART${Math.floor(100+Math.random()*900)}" maxlength="12" required></div><div class="field"><label for="pin">老師 PIN <small>至少 4 位</small></label><input id="pin" name="pin" type="password" autocomplete="new-password" inputmode="numeric" minlength="4" placeholder="自行設定" required></div></div><div class="field"><label for="duration">預設上載時限（分鐘）</label><input id="duration" name="duration" type="number" min="1" max="120" value="15" required></div><button class="primary-button full" type="submit">建立班別 <span aria-hidden="true">→</span></button></form>`:`<form id="teacher-login-form"><div class="field"><label for="classCode">班別代碼</label><input class="input-code" id="classCode" name="classCode" placeholder="班別代碼" maxlength="12" required></div><div class="field"><label for="pin">老師 PIN</label><input id="pin" name="pin" type="password" autocomplete="current-password" placeholder="建立班別時設定" required></div><button class="primary-button full" type="submit">進入老師控制台 <span aria-hidden="true">→</span></button></form>`}${!LIVE?`<div class="demo-strip">老師示範班別：<button data-action="fill-demo-teacher">填入老師示範資料</button><div class="demo-credentials">代碼 <strong>DEMO15</strong> · PIN <strong>1234</strong></div></div>`:''}`;}
@@ -271,14 +315,27 @@
   function uploadSubmittedContent(data){return `<div class="waiting-state"><div class="submitted-check">✓</div><h2>作品已安全上載</h2><p>遞交時間：${fmtTime(data.my_artwork.created_at)}。你可以留在這裡等待截止，系統會自動進入隨機互評。</p><div class="control-buttons" style="justify-content:center">${data.round?.status==='collecting'?`<button class="outline-button" data-action="replace-artwork">截止前重新上載</button>`:''}${!LIVE&&data.round?.status==='collecting'?`<button class="secondary-button" data-action="demo-close-student">示範：立即截止並分配</button>`:''}</div></div>`;}
   function reviewContent(data){
     const a=data.assignment;if(!a)return waitingContent(data);
-    if(a.submitted_at)return `<div class="waiting-state"><div class="submitted-check">✓</div><h2>你的意見已送達</h2><p>遞交時間：${fmtTime(a.submitted_at)}。原作者現在可以閱讀你的回應；你亦可在右方查看自己收到的意見。</p></div>`;
+    if(a.submitted_at)return `<div class="waiting-state"><div class="submitted-check">✓</div><h2>你的意見已送達</h2><p>遞交時間：${fmtTime(a.submitted_at)}。原作者現在可以閱讀你的四部分回應；你亦可在右方查看自己收到的意見及 AI 建議。</p></div>`;
     const art=a.artwork;
-    return `<div class="review-artwork"><img src="${esc(imageUrl(art.image_path))}" alt="獲隨機分配的同學作品：${esc(art.title)}"><span class="artwork-label">匿名同學作品</span></div><p class="kicker">YOUR RESPONSE</p><h2 style="font-family:var(--serif);font-weight:600">${esc(art.title||'同學的作品')}</h2><p class="panel-intro">先看整體，再看細節。寫出具體觀察，讓同學知道下一步可以怎樣做。</p><form id="review-form"><div class="review-prompt"><label for="appreciation"><span class="prompt-number">1</span>欣賞的地方</label><p class="field-help">哪一個色彩、構圖、技巧或想法值得保留？為甚麼？</p><textarea id="appreciation" name="appreciation" maxlength="2000" placeholder="我欣賞……因為……" required>${esc(state.draft.appreciation)}</textarea><div class="char-count"><span data-count="appreciation">${state.draft.appreciation.length}</span>／2000</div></div><div class="review-prompt"><label for="improvement"><span class="prompt-number">2</span>不足及改善方案</label><p class="field-help">指出一個可改善之處，同時提出具體、可行的修改方法。</p><textarea id="improvement" name="improvement" maxlength="2000" placeholder="我覺得……可以試着……令……" required>${esc(state.draft.improvement)}</textarea><div class="char-count"><span data-count="improvement">${state.draft.improvement.length}</span>／2000</div></div><div class="draft-status">${state.draft.appreciation||state.draft.improvement?'已載入此裝置上的草稿':''}</div><div class="submit-row"><button class="primary-button" type="submit">遞交意見給同學 <span>→</span></button><span class="save-hint">遞交後不能修改，請先檢查內容。</span></div></form>`;
+    const prompts=REVIEW_FIELDS.map((f,i)=>{
+      const value=state.draft[f.key]||'';
+      const chips=f.chips.map(chip=>`<button type="button" class="suggestion-chip ${value.includes(chip)?'selected':''}" data-action="toggle-phrase" data-field="${f.key}" data-phrase="${esc(chip)}" aria-pressed="${value.includes(chip)}">${esc(chip)}</button>`).join('');
+      return `<fieldset class="review-prompt"><legend><span class="prompt-number">${i+1}</span>${esc(f.title)}<span class="required-mark" aria-hidden="true">*</span></legend><p class="prompt-question">${esc(f.question)}</p><p class="field-help">${esc(f.help)}</p><div class="suggestion-group" aria-label="${esc(f.title)}建議字詞"><span class="suggestion-label">建議字詞 <small>按一下加入，再按可移除</small></span><div class="suggestion-chips">${chips}</div></div><label class="sr-only" for="${f.key}">${esc(f.title)}補充意見</label><textarea id="${f.key}" name="${f.key}" maxlength="2000" placeholder="${esc(f.placeholder)}" required>${esc(value)}</textarea><div class="char-count"><span data-count="${f.key}">${value.length}</span>／2000</div></fieldset>`;
+    }).join('');
+    return `<div class="review-artwork"><img src="${esc(imageUrl(art.image_path))}" alt="獲隨機分配的同學作品：${esc(art.title)}"><span class="artwork-label">匿名同學作品</span></div><p class="kicker">YOUR RESPONSE</p><h2 style="font-family:var(--serif);font-weight:600">${esc(art.title||'同學的作品')}</h2><p class="panel-intro">先看整體，再看細節。你可以選擇建議字詞，再補充自己的觀察；也可以全部自行填寫。</p><form id="review-form">${prompts}<div class="draft-status">${Object.values(state.draft).some(Boolean)?'已載入此裝置上的四部分草稿':''}</div><div class="submit-row"><button class="primary-button" type="submit">遞交四部分意見 <span>→</span></button><span class="save-hint">遞交後不能修改，請先檢查內容。</span></div></form>`;
+  }
+
+  function aiHTML(rec){
+    if(rec.ai_generated_at)return `<div class="ai-feedback"><div class="ai-heading"><span>AI 設計建議</span><small>${LIVE?'Gemini':'示範'} · 只供參考</small></div><p class="ai-intro">根據同學以上四部分意見生成，協助你整理下一稿的方向。</p>${REVIEW_FIELDS.map((f,i)=>`<div class="ai-advice"><span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><p>${esc(rec['ai_'+f.key])}</p></div>`).join('')}<span class="side-meta">生成時間：${fmtTime(rec.ai_generated_at)}</span></div>`;
+    const status=state.ai.status;
+    return `<div class="ai-feedback ai-pending"><div class="ai-heading"><span>AI 設計建議</span><small>Gemini</small></div>${status==='error'?`<p role="alert">${esc(state.ai.error||'暫時未能生成建議。')}</p><button class="outline-button small-button" data-action="retry-ai">重新生成 AI 建議</button>`:`<p>正在細讀同學的四部分意見，生成針對下一稿的建議……</p><span class="side-meta">完成後會自動顯示並保存，你可以留在本頁。</span>`}</div>`;
   }
   function sideHTML(data){
     const art=data.my_artwork,rec=data.received;
-    return `<aside class="workspace-side"><section class="side-section"><h3>我的作品</h3>${art?`<img class="side-art" src="${esc(imageUrl(art.image_path))}" alt="我的作品：${esc(art.title)}"><h4 class="side-title">${esc(art.title)}</h4><span class="side-meta">已於 ${fmtTime(art.created_at)} 遞交</span>`:`<p class="empty-side">尚未上載作品。</p>`}</section><section class="side-section"><h3>我收到的意見</h3>${rec?.submitted_at?`<div class="feedback-received"><span class="feedback-label">01 · 欣賞的地方</span><p class="feedback-quote">${esc(rec.appreciation)}</p><span class="feedback-label">02 · 不足及改善方案</span><p class="feedback-quote">${esc(rec.improvement)}</p><span class="side-meta">同學已於 ${fmtTime(rec.submitted_at)} 遞交</span></div>`:`<p class="empty-side">${art?'負責互評的同學遞交後，意見會自動出現在這裡。':'上載作品後，才有機會收到同學意見。'}</p>`}</section></aside>`;
+    const peer=rec?.submitted_at?`<div class="feedback-received"><div class="peer-heading">同學的四部分觀察</div>${REVIEW_FIELDS.map((f,i)=>`<span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><p class="feedback-quote">${esc(peerValue(rec,f.key))}</p>`).join('')}<span class="side-meta">同學已於 ${fmtTime(rec.submitted_at)} 遞交</span></div>${aiHTML(rec)}`:`<p class="empty-side">${art?'負責互評的同學遞交後，四部分意見及 AI 建議會自動出現在這裡。':'上載作品後，才有機會收到同學意見。'}</p>`;
+    return `<aside class="workspace-side"><section class="side-section"><h3>我的作品</h3>${art?`<img class="side-art" src="${esc(imageUrl(art.image_path))}" alt="我的作品：${esc(art.title)}"><h4 class="side-title">${esc(art.title)}</h4><span class="side-meta">已於 ${fmtTime(art.created_at)} 遞交</span>`:`<p class="empty-side">尚未上載作品。</p>`}</section><section class="side-section"><h3>我收到的意見</h3>${peer}</section></aside>`;
   }
+
   function renderStudent(){
     const d=state.data,s=state.session;if(!d)return;
     const r=d.round;let title='等待活動開始',subtitle='系統會自動更新階段',content='';
@@ -295,7 +352,7 @@
     const active=['collecting','reviewing'].includes(r?.status);
     const statusText=!r?'尚未開始':r.status==='collecting'?'作品上載中':r.status==='reviewing'?'同儕互評中':'本輪已完結';
     const rows=students.map(s=>`<tr><td><strong>${esc(s.student_no)}</strong></td><td>${esc(s.display_name)}${s.id.startsWith('bot-')&&!LIVE?' <span class="side-meta">（示例）</span>':''}</td><td><span class="status-tag ${s.has_artwork?'done':'waiting'}">${s.has_artwork?'已上載':'未上載'}</span></td><td><span class="status-tag ${s.review_status==='submitted'?'done':s.review_status==='assigned'?'active':'waiting'}">${s.review_status==='submitted'?'已遞交意見':s.review_status==='assigned'?'互評進行中':'尚未分配'}</span></td></tr>`).join('');
-    $('#main').innerHTML=`<div class="app-shell"><div class="app-topline"><div><p class="eyebrow">TEACHER CONSOLE</p><h1>${esc(d.class.name)}</h1><p>${esc(statusText)} · 每 10 秒自動更新</p></div><div class="user-actions"><button class="outline-button compact" data-action="logout">離開 <span>↗</span></button></div></div>${connectionHTML()}${errorHTML()}<div class="class-code-box"><span class="kicker">學生班別代碼</span><strong>${esc(d.class.join_code)}</strong><button class="outline-button small-button" data-action="copy-code" data-code="${esc(d.class.join_code)}">複製代碼</button></div><div class="teacher-stats"><div class="stat timer-stat"><strong>${r?.status==='collecting'?`<span class="timer" data-deadline="${esc(r.submission_ends_at)}">--:--</span>`:esc(statusText)}</strong><span>${r?.status==='collecting'?'距離上載截止':'目前活動狀態'}</span></div><div class="stat"><strong>${students.length}</strong><span>已加入學生</span></div><div class="stat"><strong>${uploads}<small style="font-size:16px;color:var(--muted)">／${students.length}</small></strong><span>已上載作品</span></div><div class="stat"><strong>${reviews}<small style="font-size:16px;color:var(--muted)">／${uploads}</small></strong><span>已完成互評</span></div></div><div class="teacher-controls"><div>${!active?`<label class="field-label" for="round-duration">下一輪上載時限（分鐘）</label><input id="round-duration" type="number" min="1" max="120" value="${d.class.duration_minutes||15}" style="width:150px">`:`<p>${r.status==='collecting'?'倒數完結後，系統會以伺服器時間自動隨機分配，不會分到自己的作品。':'學生正在填寫兩部分意見；全部完成後，本輪會自動完結。'}</p>`}</div><div class="control-buttons">${!active?`<button class="primary-button" data-action="start-round">開始 ${r?'新一輪':'第一輪'} <span>→</span></button>`:''}${r?.status==='collecting'?`<button class="secondary-button" data-action="close-round">提前截止並分配</button>`:''}${r?.status==='reviewing'?`<button class="danger-button" data-action="complete-round">結束本輪互評</button>`:''}</div></div><section><div class="section-heading"><div><span class="kicker">LIVE PROGRESS</span><h2>學生進度</h2></div><button class="text-button" data-action="refresh-teacher">重新整理 ↻</button></div><div class="student-table-wrap">${students.length?`<table class="student-table"><thead><tr><th>學生編號</th><th>姓名</th><th>作品</th><th>互評意見</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty-class">學生以班別代碼及學生編號加入後，進度會顯示在這裡。</div>`}</div></section></div>`;
+    $('#main').innerHTML=`<div class="app-shell"><div class="app-topline"><div><p class="eyebrow">TEACHER CONSOLE</p><h1>${esc(d.class.name)}</h1><p>${esc(statusText)} · 每 10 秒自動更新</p></div><div class="user-actions"><button class="outline-button compact" data-action="logout">離開 <span>↗</span></button></div></div>${connectionHTML()}${errorHTML()}<div class="class-code-box"><span class="kicker">學生班別代碼</span><strong>${esc(d.class.join_code)}</strong><button class="outline-button small-button" data-action="copy-code" data-code="${esc(d.class.join_code)}">複製代碼</button></div><div class="teacher-stats"><div class="stat timer-stat"><strong>${r?.status==='collecting'?`<span class="timer" data-deadline="${esc(r.submission_ends_at)}">--:--</span>`:esc(statusText)}</strong><span>${r?.status==='collecting'?'距離上載截止':'目前活動狀態'}</span></div><div class="stat"><strong>${students.length}</strong><span>已加入學生</span></div><div class="stat"><strong>${uploads}<small style="font-size:16px;color:var(--muted)">／${students.length}</small></strong><span>已上載作品</span></div><div class="stat"><strong>${reviews}<small style="font-size:16px;color:var(--muted)">／${uploads}</small></strong><span>已完成互評</span></div></div><div class="teacher-controls"><div>${!active?`<label class="field-label" for="round-duration">下一輪上載時限（分鐘）</label><input id="round-duration" type="number" min="1" max="120" value="${d.class.duration_minutes||15}" style="width:150px">`:`<p>${r.status==='collecting'?'倒數完結後，系統會以伺服器時間自動隨機分配，不會分到自己的作品。':'學生正在填寫四部分意見；全部完成後，本輪會自動完結。'}</p>`}</div><div class="control-buttons">${!active?`<button class="primary-button" data-action="start-round">開始 ${r?'新一輪':'第一輪'} <span>→</span></button>`:''}${r?.status==='collecting'?`<button class="secondary-button" data-action="close-round">提前截止並分配</button>`:''}${r?.status==='reviewing'?`<button class="danger-button" data-action="complete-round">結束本輪互評</button>`:''}</div></div><section><div class="section-heading"><div><span class="kicker">LIVE PROGRESS</span><h2>學生進度</h2></div><button class="text-button" data-action="refresh-teacher">重新整理 ↻</button></div><div class="student-table-wrap">${students.length?`<table class="student-table"><thead><tr><th>學生編號</th><th>姓名</th><th>作品</th><th>互評意見</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty-class">學生以班別代碼及學生編號加入後，進度會顯示在這裡。</div>`}</div></section></div>`;
     updateTimer();
   }
   function render(){
@@ -341,6 +398,21 @@
     if(action==='complete-round')await completeRound();
     if(action==='refresh-teacher')await refreshTeacher();
     if(action==='copy-code')await copyText(b.dataset.code);
+    if(action==='toggle-phrase'){
+      const field=b.dataset.field,phrase=b.dataset.phrase,area=document.getElementById(field);if(!area||!REVIEW_FIELDS.some(f=>f.key===field))return;
+      let value=area.value;
+      if(value.includes(phrase)){
+        value=value.split(phrase).join('').replace(/(^|[；;\n])\s*[；;]+/g,'$1').replace(/[；;]{2,}/g,'；').replace(/^\s*[；;]\s*/,'').replace(/\s*[；;]\s*$/,'');
+      }else{
+        const separator=value.trim()?(/[。！？；;\n]$/.test(value.trim())?'':'；'):'';
+        value=value.trimEnd()+separator+phrase;
+      }
+      if(value.length>2000){toast('這部分不可超過 2000 字。','error');return;}
+      area.value=value;state.draft[field]=value;$(`[data-count="${field}"]`).textContent=value.length;saveDraft();
+      $$(`[data-field="${field}"]`).forEach(chip=>{const selected=value.includes(chip.dataset.phrase);chip.classList.toggle('selected',selected);chip.setAttribute('aria-pressed',String(selected));});
+      area.focus();
+    }
+    if(action==='retry-ai'){const rec=state.data?.received;if(rec)generateAI(rec.id||rec.submitted_at);}
   });
   document.addEventListener('submit',async e=>{
     e.preventDefault();
@@ -351,7 +423,10 @@
   });
   document.addEventListener('change',e=>{if(e.target.id==='artwork-file')selectImage(e.target.files[0]);});
   document.addEventListener('input',e=>{
-    if(['appreciation','improvement'].includes(e.target.id)){state.draft[e.target.id]=e.target.value;const count=$(`[data-count="${e.target.id}"]`);if(count)count.textContent=e.target.value.length;saveDraft();}
+    if(REVIEW_FIELDS.some(f=>f.key===e.target.id)){
+      state.draft[e.target.id]=e.target.value;const count=$(`[data-count="${e.target.id}"]`);if(count)count.textContent=e.target.value.length;saveDraft();
+      $$(`[data-field="${e.target.id}"]`).forEach(chip=>{const selected=e.target.value.includes(chip.dataset.phrase);chip.classList.toggle('selected',selected);chip.setAttribute('aria-pressed',String(selected));});
+    }
     if(e.target.name==='classCode')e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g,'');
   });
   document.addEventListener('dragover',e=>{const z=e.target.closest('#upload-zone');if(z){e.preventDefault();z.classList.add('dragging');}});
@@ -360,7 +435,7 @@
   document.addEventListener('visibilitychange',()=>{if(!document.hidden){if(state.view==='student')refreshStudent(true);if(state.view==='teacher')refreshTeacher(true);}});
   window.addEventListener('online',()=>{toast('網絡已恢復，正在同步紀錄。');if(state.view==='student')refreshStudent(true);if(state.view==='teacher')refreshTeacher(true);});
   window.addEventListener('offline',()=>toast('目前離線。已保存的草稿仍在此裝置，雲端同步會在恢復連線後繼續。','error'));
-  window.addEventListener('beforeunload',()=>{if(state.draft.appreciation||state.draft.improvement)saveDraft(true);});
+  window.addEventListener('beforeunload',()=>{if(Object.values(state.draft).some(Boolean))saveDraft(true);});
 
   async function init(){
     render();

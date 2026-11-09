@@ -45,11 +45,35 @@ create table if not exists public.reviews (
   round_id uuid not null references public.rounds(id) on delete cascade,
   artwork_id uuid not null unique references public.artworks(id) on delete cascade,
   reviewer_id uuid not null references public.students(id) on delete cascade,
-  appreciation text not null default '',
+  appreciation text not null default '', -- 舊版兩題格式保留作相容
   improvement text not null default '',
+  fusion text not null default '',
+  proportion text not null default '',
+  focus text not null default '',
+  communication text not null default '',
+  ai_fusion text not null default '',
+  ai_proportion text not null default '',
+  ai_focus text not null default '',
+  ai_communication text not null default '',
+  ai_started_at timestamptz,
+  ai_generated_at timestamptz,
+  ai_model text,
   submitted_at timestamptz,
   unique(round_id, reviewer_id)
 );
+-- 已有班別升級至四題互評及 Gemini 回饋；不影響舊紀錄。
+alter table public.reviews add column if not exists fusion text not null default '';
+alter table public.reviews add column if not exists proportion text not null default '';
+alter table public.reviews add column if not exists focus text not null default '';
+alter table public.reviews add column if not exists communication text not null default '';
+alter table public.reviews add column if not exists ai_fusion text not null default '';
+alter table public.reviews add column if not exists ai_proportion text not null default '';
+alter table public.reviews add column if not exists ai_focus text not null default '';
+alter table public.reviews add column if not exists ai_communication text not null default '';
+alter table public.reviews add column if not exists ai_started_at timestamptz;
+alter table public.reviews add column if not exists ai_generated_at timestamptz;
+alter table public.reviews add column if not exists ai_model text;
+
 create index if not exists idx_students_class on public.students(class_id);
 create index if not exists idx_artworks_round on public.artworks(round_id);
 create index if not exists idx_reviews_reviewer on public.reviews(round_id, reviewer_id);
@@ -159,11 +183,17 @@ begin
     into v_art from public.artworks a where a.round_id=v_round.id and a.student_id=v_student.id;
     select json_build_object(
       'id',rv.id,'submitted_at',rv.submitted_at,'appreciation',rv.appreciation,'improvement',rv.improvement,
+      'fusion',rv.fusion,'proportion',rv.proportion,'focus',rv.focus,'communication',rv.communication,
       'artwork',json_build_object('id',a.id,'title',a.title,'image_path',a.image_path,'created_at',a.created_at)
     ) into v_assignment
     from public.reviews rv join public.artworks a on a.id=rv.artwork_id
     where rv.round_id=v_round.id and rv.reviewer_id=v_student.id;
-    select json_build_object('appreciation',rv.appreciation,'improvement',rv.improvement,'submitted_at',rv.submitted_at)
+    select json_build_object(
+      'id',rv.id,'appreciation',rv.appreciation,'improvement',rv.improvement,
+      'fusion',rv.fusion,'proportion',rv.proportion,'focus',rv.focus,'communication',rv.communication,
+      'ai_fusion',rv.ai_fusion,'ai_proportion',rv.ai_proportion,'ai_focus',rv.ai_focus,'ai_communication',rv.ai_communication,
+      'ai_started_at',rv.ai_started_at,'ai_generated_at',rv.ai_generated_at,'ai_model',rv.ai_model,'submitted_at',rv.submitted_at
+    )
     into v_received
     from public.reviews rv join public.artworks a on a.id=rv.artwork_id
     where a.round_id=v_round.id and a.student_id=v_student.id and rv.submitted_at is not null;
@@ -197,6 +227,14 @@ end $$;
 create or replace function public.submit_review(
   p_token text, p_appreciation text, p_improvement text
 ) returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
+begin
+  -- 舊版兩題入口停用，避免繞過新版四部分必填驗證。
+  raise exception '系統已升級，請重新整理頁面後完成四部分意見';
+end $$;
+
+create or replace function public.submit_review_v2(
+  p_token text, p_fusion text, p_proportion text, p_focus text, p_communication text
+) returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
 declare v_student public.students%rowtype; v_class public.classes%rowtype; v_round public.rounds%rowtype; v_review public.reviews%rowtype;
 begin
   select * into v_student from public.students where token=p_token;
@@ -204,14 +242,81 @@ begin
   select * into v_class from public.classes where id=v_student.class_id;
   select * into v_round from public.rounds where id=v_class.current_round_id;
   if v_round.status<>'reviewing' then raise exception '目前不是互評階段'; end if;
-  if length(trim(p_appreciation))<2 or length(trim(p_improvement))<2 then raise exception '請完成兩部分意見'; end if;
-  if length(p_appreciation)>2000 or length(p_improvement)>2000 then raise exception '每部分意見不可超過 2000 字'; end if;
-  update public.reviews set appreciation=trim(p_appreciation),improvement=trim(p_improvement),submitted_at=now()
+  if length(trim(p_fusion))<2 or length(trim(p_proportion))<2 or length(trim(p_focus))<2 or length(trim(p_communication))<2 then
+    raise exception '請完成四部分意見';
+  end if;
+  if length(p_fusion)>2000 or length(p_proportion)>2000 or length(p_focus)>2000 or length(p_communication)>2000 then
+    raise exception '每部分意見不可超過 2000 字';
+  end if;
+  update public.reviews set fusion=trim(p_fusion),proportion=trim(p_proportion),focus=trim(p_focus),communication=trim(p_communication),submitted_at=now()
   where round_id=v_round.id and reviewer_id=v_student.id and submitted_at is null
   returning * into v_review;
   if not found then raise exception '找不到待遞交的互評，或意見已經遞交'; end if;
   perform public._advance_round(v_class.id,false);
   return json_build_object('submitted_at',v_review.submitted_at);
+end $$;
+
+-- 學生 token 就是 AI 函式的權限邊界：只能為自己的作品取得及保存建議。
+create or replace function public.prepare_ai_feedback(p_token text)
+returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
+declare v_student public.students%rowtype; v_class public.classes%rowtype; v_review public.reviews%rowtype; v_title text;
+begin
+  select * into v_student from public.students where token=p_token;
+  if not found then raise exception '登入紀錄已失效'; end if;
+  select * into v_class from public.classes where id=v_student.class_id;
+  select rv.* into v_review
+  from public.reviews rv
+  join public.artworks a on a.id=rv.artwork_id
+  where rv.round_id=v_class.current_round_id and a.student_id=v_student.id
+  for update of rv;
+  if not found or v_review.submitted_at is null then raise exception '同學意見尚未遞交'; end if;
+  select a.title into v_title from public.artworks a where a.id=v_review.artwork_id;
+  if v_review.ai_generated_at is not null then return json_build_object('status','already_generated'); end if;
+  if v_review.ai_started_at is not null and v_review.ai_started_at>now()-interval '5 minutes' then
+    return json_build_object('status','generating');
+  end if;
+  update public.reviews set ai_started_at=now() where id=v_review.id;
+  return json_build_object(
+    'status','ready','artwork_title',v_title,'fusion',v_review.fusion,'proportion',v_review.proportion,
+    'focus',v_review.focus,'communication',v_review.communication
+  );
+end $$;
+
+create or replace function public.save_ai_feedback(
+  p_token text, p_fusion text, p_proportion text, p_focus text, p_communication text, p_model text
+) returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
+declare v_student public.students%rowtype; v_class public.classes%rowtype; v_review public.reviews%rowtype;
+begin
+  select * into v_student from public.students where token=p_token;
+  if not found then raise exception '登入紀錄已失效'; end if;
+  select * into v_class from public.classes where id=v_student.class_id;
+  if length(trim(p_fusion))<2 or length(trim(p_proportion))<2 or length(trim(p_focus))<2 or length(trim(p_communication))<2 then
+    raise exception 'AI 回應不完整';
+  end if;
+  if length(p_fusion)>2000 or length(p_proportion)>2000 or length(p_focus)>2000 or length(p_communication)>2000 then
+    raise exception 'AI 回應過長';
+  end if;
+  update public.reviews rv set ai_fusion=trim(p_fusion),ai_proportion=trim(p_proportion),ai_focus=trim(p_focus),ai_communication=trim(p_communication),
+    ai_generated_at=now(),ai_started_at=null,ai_model=left(coalesce(p_model,'Gemini'),100)
+  from public.artworks a
+  where a.id=rv.artwork_id and rv.round_id=v_class.current_round_id and a.student_id=v_student.id
+    and rv.submitted_at is not null and rv.ai_started_at is not null and rv.ai_generated_at is null
+  returning rv.* into v_review;
+  if not found then raise exception 'AI 建議已被更新或目前不能保存'; end if;
+  return json_build_object('generated_at',v_review.ai_generated_at);
+end $$;
+
+create or replace function public.reset_ai_feedback(p_token text)
+returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
+declare v_student public.students%rowtype; v_class public.classes%rowtype;
+begin
+  select * into v_student from public.students where token=p_token;
+  if not found then raise exception '登入紀錄已失效'; end if;
+  select * into v_class from public.classes where id=v_student.class_id;
+  update public.reviews rv set ai_started_at=null
+  from public.artworks a
+  where a.id=rv.artwork_id and rv.round_id=v_class.current_round_id and a.student_id=v_student.id and rv.ai_generated_at is null;
+  return json_build_object('ok',true);
 end $$;
 
 create or replace function public.get_teacher_state(p_join_code text, p_pin text)
@@ -282,6 +387,10 @@ grant execute on function public.join_class(text,text,text) to anon,authenticate
 grant execute on function public.get_student_state(text) to anon,authenticated;
 grant execute on function public.submit_artwork(text,text,text) to anon,authenticated;
 grant execute on function public.submit_review(text,text,text) to anon,authenticated;
+grant execute on function public.submit_review_v2(text,text,text,text,text) to anon,authenticated;
+grant execute on function public.prepare_ai_feedback(text) to anon,authenticated;
+grant execute on function public.save_ai_feedback(text,text,text,text,text,text) to anon,authenticated;
+grant execute on function public.reset_ai_feedback(text) to anon,authenticated;
 grant execute on function public.get_teacher_state(text,text) to anon,authenticated;
 grant execute on function public.start_round(text,text,integer) to anon,authenticated;
 grant execute on function public.close_submissions(text,text) to anon,authenticated;
