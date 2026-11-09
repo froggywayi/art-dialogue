@@ -39,15 +39,36 @@
     <ol class="guide-list">
       <li><span>01</span><div><strong>限時上載</strong><p>老師開始活動後，在倒數結束前上載一張作品圖片。遞交後會永久保存目前階段。</p></div></li>
       <li><span>02</span><div><strong>隨機互評</strong><p>截止後系統自動分配另一位同學的作品，不會分到自己的作品。按融合手法、剪裁比例、視覺焦點及設計圖傳意四個角度回應；可選建議字詞，也可自行補充。</p></div></li>
-      <li><span>03</span><div><strong>收回意見</strong><p>同學遞交意見後，原作者即可閱讀四部分回應及 Gemini AI 生成的修改建議。未完成的意見草稿會保存在目前裝置。</p></div></li>
+      <li><span>03</span><div><strong>收回同學及 AI 意見</strong><p>原作者可閱讀同學四部分回應，以及 Gemini 直接觀察原作後生成的四部分評價。AI 評價不是整理同學評語；未完成的意見草稿會保存在目前裝置。</p></div></li>
+      <li><span>04</span><div><strong>生成改善圖及保存紀錄</strong><p>原作者看完文字意見後，可手動生成一張以原作為基礎的 AI 改善效果圖，會有額外雲端用量。每輪每份作品只限一張成功生成的改善圖；必須在下一輪重新上載及收到新評價，才可再生成。完成所有階段後，學生可下載個人評語及改善圖 ZIP；老師則可選擇下載目前一輪或全部輪次的全班紀錄。</p></div></li>
     </ol>
     <div class="guide-note"><strong>關閉頁面也不用擔心</strong><p>再次以相同班別代碼及學生編號進入，即可恢復已上載作品、互評及收到的意見。雲端模式需保持網絡連線。</p></div>
     <button class="primary-button full" data-action="close-guide">明白了</button>
+  </dialog>
+
+  <dialog id="export-dialog" class="guide-dialog export-dialog" aria-labelledby="export-title">
+    <button class="dialog-close" data-action="close-export" aria-label="關閉匯出視窗">×</button>
+    <p class="eyebrow">TEACHER EXPORT</p>
+    <h2 id="export-title">下載作品及評語</h2>
+    <p class="panel-intro">請選擇今次 ZIP 的範圍。系統會重新讀取當刻紀錄，不會預先固定下載內容。</p>
+    <div id="export-form">
+      <fieldset class="export-options">
+        <legend>匯出範圍</legend>
+        <label><input type="radio" name="export-scope" id="export-current" value="current" checked><span><strong>目前一輪</strong><small>只下載老師控制台顯示的本輪作品及紀錄</small></span></label>
+        <label><input type="radio" name="export-scope" id="export-all" value="all"><span><strong>全部輪次</strong><small>按輪次及學生分資料夾，包含所有已保存作品</small></span></label>
+      </fieldset>
+      <div class="export-contents"><strong>每份 ZIP 包括</strong><ul><li>學生原作及已生成的 AI 改善效果圖</li><li>HTML 評語報告及 UTF-8 CSV 評語紀錄</li><li>原作者、互評來源、四部分同學／AI 文字、模型及生成時間</li></ul></div>
+      <p id="export-status" class="export-status" aria-live="polite"></p>
+      <p id="export-error" class="inline-error" role="alert"></p>
+      <div class="submit-row"><button class="primary-button full" data-action="confirm-export">確認製作 ZIP <span>→</span></button><button class="outline-button" data-action="close-export">取消</button></div>
+      <p class="form-note">如任何原作或已記錄的改善圖下載失敗，系統會停止而不交付不完整 ZIP。全部輪次可能需時較長，請保持本頁開啟。</p>
+    </div>
   </dialog>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
   <script src="config.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="vendor/fflate.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

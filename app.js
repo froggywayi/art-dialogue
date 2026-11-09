@@ -22,7 +22,8 @@
   const emptyDraft=()=>Object.fromEntries(REVIEW_FIELDS.map(f=>[f.key,'']));
   const peerValue=(rec,key)=>rec?.[key]||((key==='fusion'?rec?.appreciation:key==='proportion'?rec?.improvement:'')||'');
   const state = { view:'home', homeMode:'student', session:store.get(KEYS.session), data:null, teacherData:null,
-    loading:false, error:'', file:null, preview:'', draft:emptyDraft(), draftKey:'', lastSignature:'', lastTeacherSignature:'', demoTeacher:false, replacing:false, ai:{key:'',status:'idle',error:''} };
+    loading:false, error:'', file:null, preview:'', draft:emptyDraft(), draftKey:'', lastSignature:'', lastTeacherSignature:'', demoTeacher:false, replacing:false,
+    ai:{key:'',status:'idle',error:''}, aiImage:{key:'',status:'idle',error:''}, export:{status:'idle',error:'',progress:''}, studentExport:{status:'idle',error:''} };
   let pollTimer=null, countdownTimer=null, draftTimer=null, objectUrl=null;
 
   function toast(message, type='success') {
@@ -134,6 +135,24 @@
       state.ai.status='done';state.lastSignature='';await refreshStudent();
     }catch(e){state.ai={key:key||rec.id||rec.submitted_at,status:'error',error:e.message};render();}
   }
+  async function generateAIImage(key){
+    const rec=state.data?.received;
+    if(!rec||!rec.ai_generated_at||rec.ai_image_generated_at||state.aiImage.status==='loading')return;
+    if(!confirm('生成改善效果圖會把原作、同學四部分意見及 AI 四部分評價傳到 Google Cloud Vertex AI，並產生額外圖像生成用量。每份作品只需生成一次，結果會保存在雲端。確定生成？'))return;
+    const imageKey=key||rec.id||rec.submitted_at;
+    state.aiImage={key:imageKey,status:'loading',error:''};render();
+    try{
+      const response=await fetch(`${CFG.SUPABASE_URL.replace(/\/$/,'')}/functions/v1/generate-improvement-image`,{
+        method:'POST',headers:{'Content-Type':'application/json','apikey':CFG.SUPABASE_ANON_KEY},body:JSON.stringify({token:state.session.token})
+      });
+      const result=await response.json().catch(()=>({}));
+      if(!response.ok&&response.status!==202)throw new Error(result.error||'改善效果圖暫時未能生成，請稍後重試。');
+      if(result.status==='generating'){
+        state.aiImage.status='waiting';render();setTimeout(()=>{if(state.view==='student')refreshStudent(true);},7000);return;
+      }
+      state.aiImage.status='done';state.lastSignature='';await refreshStudent();toast('改善效果圖已生成並保存。');
+    }catch(e){state.aiImage={key:imageKey,status:'error',error:e.message};render();}
+  }
   async function refreshStudent(silent=false){
     if(!state.session||state.session.role!=='student')return;
     if(!silent)setLoading(true);
@@ -141,6 +160,7 @@
       const data=LIVE?await rpc('get_student_state',{p_token:state.session.token}):demoStudentState(state.session);
       const signature=JSON.stringify({round:data.round,art:data.my_artwork,assignment:data.assignment,received:data.received});
       state.data=data;store.set(KEYS.cache,{session:state.session,data});
+      if(data.received?.ai_image_generated_at){const key=data.received.id||data.received.submitted_at;if(state.aiImage.key!==key||state.aiImage.status!=='done')state.aiImage={key,status:'done',error:''};}
       if(signature!==state.lastSignature){state.lastSignature=signature;loadDraft();render();}
       else updateTimer();
       state.error='';
@@ -326,13 +346,24 @@
   }
 
   function aiHTML(rec){
-    if(rec.ai_generated_at)return `<div class="ai-feedback"><div class="ai-heading"><span>AI 設計建議</span><small>${LIVE?'Gemini':'示範'} · 只供參考</small></div><p class="ai-intro">根據同學以上四部分意見生成，協助你整理下一稿的方向。</p>${REVIEW_FIELDS.map((f,i)=>`<div class="ai-advice"><span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><p>${esc(rec['ai_'+f.key])}</p></div>`).join('')}<span class="side-meta">生成時間：${fmtTime(rec.ai_generated_at)}</span></div>`;
+    if(rec.ai_generated_at)return `<div class="ai-feedback"><div class="ai-heading"><span>AI 原作評價</span><small>${esc(rec.ai_model||(LIVE?'Gemini':'示範'))} · 只供參考</small></div><p class="ai-intro">AI 直接觀察你的原作圖片，按圖中可見細節評價及提出建議，並非整理同學評語。</p>${REVIEW_FIELDS.map((f,i)=>`<div class="ai-advice"><span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><p>${esc(rec['ai_'+f.key])}</p></div>`).join('')}<span class="side-meta">生成時間：${fmtTime(rec.ai_generated_at)}</span></div>`;
     const status=state.ai.status;
-    return `<div class="ai-feedback ai-pending"><div class="ai-heading"><span>AI 設計建議</span><small>Gemini</small></div>${status==='error'?`<p role="alert">${esc(state.ai.error||'暫時未能生成建議。')}</p><button class="outline-button small-button" data-action="retry-ai">重新生成 AI 建議</button>`:`<p>正在細讀同學的四部分意見，生成針對下一稿的建議……</p><span class="side-meta">完成後會自動顯示並保存，你可以留在本頁。</span>`}</div>`;
+    return `<div class="ai-feedback ai-pending"><div class="ai-heading"><span>AI 原作評價</span><small>Gemini</small></div>${status==='error'?`<p role="alert">${esc(state.ai.error||'暫時未能生成建議。')}</p><button class="outline-button small-button" data-action="retry-ai">重新生成原作評價</button>`:`<p>正在直接觀察你的原作，從融合手法、剪裁比例、視覺焦點及設計圖傳意四部分提出評價……</p><span class="side-meta">完成後會自動顯示並保存，你可以留在本頁。</span>`}</div>`;
+  }
+  function improvementImageHTML(rec){
+    if(!LIVE||!rec?.ai_generated_at)return '';
+    if(rec.ai_image_generated_at&&rec.ai_image_path){
+      const canDownload=!!state.data?.assignment?.submitted_at,working=state.studentExport.status==='working';
+      return `<section class="improvement-result" aria-labelledby="improvement-title"><div class="ai-heading"><span id="improvement-title">AI 改善效果圖</span><small>${esc(rec.ai_image_model||'Gemini')}</small></div><p class="ai-intro">以原作為基礎，綜合同學及 AI 四部分文字意見生成；請與上方原作對照，判斷哪些修改適合你的下一稿。</p><figure><img src="${esc(imageUrl(rec.ai_image_path))}" alt="根據原作及互評意見生成的 AI 改善服裝設計效果圖" loading="lazy"><figcaption>${esc(rec.ai_image_summary||'已保存 AI 改善效果圖。')}</figcaption></figure><span class="side-meta">生成時間：${fmtTime(rec.ai_image_generated_at)}</span><p class="generation-limit">本輪改善圖已完成，不能再次生成。如需另一張，請在下一輪重新上載作品並收到新的同學評價。</p><div class="student-download-actions"><a class="outline-button small-button download-image" href="${esc(imageUrl(rec.ai_image_path))}" download target="_blank" rel="noopener">只下載改善圖</a>${canDownload?`<button class="primary-button small-button" data-action="download-student-pack" ${working?'disabled':''}>${working?'正在製作 ZIP……':'下載我的評語及改善圖'}</button>`:'<small>完成你負責的同學互評後，即可下載完整個人紀錄。</small>'}</div>${state.studentExport.status==='error'?`<p class="inline-error" role="alert">${esc(state.studentExport.error)}</p>`:''}<p class="student-pack-note">個人 ZIP 包含原作、改善圖、同學及 AI 四部分文字、HTML 報告和 CSV；同學來源保持匿名。重複下載不會重新生成。</p></section>`;
+    }
+    const key=rec.id||rec.submitted_at,current=state.aiImage.key===key?state.aiImage.status:(rec.ai_image_started_at?'waiting':'idle');
+    const error=state.aiImage.key===key?state.aiImage.error:'';
+    if(current==='loading'||current==='waiting')return `<section class="improvement-result ai-pending"><div class="ai-heading"><span>AI 改善效果圖</span><small>Gemini</small></div><p>正在綜合原作、同學及 AI 的文字意見，生成保留原設計特色的改善圖……</p><span class="side-meta">圖像生成需要較長時間。完成後會保存，重新整理不會自動重複生成。</span><button class="text-button" data-action="refresh-student">重新查看進度</button></section>`;
+    return `<section class="improvement-result improvement-cta"><div class="ai-heading"><span>下一步：改善效果圖</span><small>由你決定何時生成</small></div><p>看完同學及 AI 意見後，讓 AI 以原作為基礎綜合建議，生成一張改善後的全身服裝設計效果圖。</p>${current==='error'?`<p class="inline-error" role="alert">${esc(error||'改善效果圖暫時未能生成。')}</p>`:''}<button class="primary-button full" data-action="generate-ai-image">${current==='error'?'重試生成改善效果圖':'生成改善效果圖'} <span>→</span></button><small>圖像生成會產生額外 Vertex AI 用量；按鈕後會再要求確認。姓名及學生編號不會傳給模型。</small></section>`;
   }
   function sideHTML(data){
     const art=data.my_artwork,rec=data.received;
-    const peer=rec?.submitted_at?`<div class="feedback-received"><div class="peer-heading">同學的四部分觀察</div>${REVIEW_FIELDS.map((f,i)=>`<span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><p class="feedback-quote">${esc(peerValue(rec,f.key))}</p>`).join('')}<span class="side-meta">同學已於 ${fmtTime(rec.submitted_at)} 遞交</span></div>${aiHTML(rec)}`:`<p class="empty-side">${art?'負責互評的同學遞交後，四部分意見及 AI 建議會自動出現在這裡。':'上載作品後，才有機會收到同學意見。'}</p>`;
+    const peer=rec?.submitted_at?`<div class="feedback-received"><div class="peer-heading">同學的四部分觀察</div>${REVIEW_FIELDS.map((f,i)=>`<span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><p class="feedback-quote">${esc(peerValue(rec,f.key))}</p>`).join('')}<span class="side-meta">同學已於 ${fmtTime(rec.submitted_at)} 遞交</span></div>${aiHTML(rec)}${improvementImageHTML(rec)}`:`<p class="empty-side">${art?'負責互評的同學遞交後，四部分意見及 AI 原作評價會自動出現在這裡。':'上載作品後，才有機會收到同學意見。'}</p>`;
     return `<aside class="workspace-side"><section class="side-section"><h3>我的作品</h3>${art?`<img class="side-art" src="${esc(imageUrl(art.image_path))}" alt="我的作品：${esc(art.title)}"><h4 class="side-title">${esc(art.title)}</h4><span class="side-meta">已於 ${fmtTime(art.created_at)} 遞交</span>`:`<p class="empty-side">尚未上載作品。</p>`}</section><section class="side-section"><h3>我收到的意見</h3>${peer}</section></aside>`;
   }
 
@@ -346,13 +377,113 @@
     updateTimer();
   }
 
+  function openTeacherExport(){
+    if(!LIVE){toast('本機示範不提供雲端紀錄匯出。','error');return;}
+    state.export={status:'idle',error:'',progress:''};
+    const dialog=$('#export-dialog'),current=$('#export-current'),all=$('#export-all');
+    current.disabled=!state.teacherData?.round?.id;current.checked=!!state.teacherData?.round?.id;all.checked=!current.checked;
+    $('#export-form').querySelectorAll('input,button').forEach(el=>el.disabled=el===current?current.disabled:false);
+    $('#export-status').textContent='ZIP 會包含原作、已生成的改善圖、HTML 評語報告及 CSV 紀錄。';
+    $('#export-error').textContent='';dialog.showModal();
+  }
+  function safeFileName(value,max=70){
+    let name=String(value||'未命名').replace(/[<>:"/\\|?*\x00-\x1F]/g,'_').replace(/[. ]+$/g,'').trim();
+    if(!name)name='未命名';if(/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name))name='_'+name;
+    return [...name].slice(0,max).join('');
+  }
+  function csvCell(value){
+    let text=String(value??'');if(/^[=+\-@]/.test(text))text="'"+text;
+    return '"'+text.replace(/"/g,'""')+'"';
+  }
+  function fullTime(value){return value?new Intl.DateTimeFormat('zh-HK',{dateStyle:'medium',timeStyle:'medium'}).format(new Date(value)):'';}
+  function exportPath(path){return String(path||'').split('/').map(encodeURIComponent).join('/');}
+  async function exportImage(path,label){
+    const response=await fetch(imageUrl(path));if(!response.ok)throw new Error(`${label}下載失敗（HTTP ${response.status}），ZIP 尚未產生。`);
+    const bytes=new Uint8Array(await response.arrayBuffer());if(!bytes.length)throw new Error(`${label}是空白檔案，ZIP 尚未產生。`);
+    const declaredMime=(response.headers.get('content-type')||'').split(';')[0];
+    const actualMime=bytes.length>3&&bytes[0]===0xff&&bytes[1]===0xd8&&bytes[2]===0xff?'image/jpeg':bytes.length>8&&bytes[0]===0x89&&bytes[1]===0x50&&bytes[2]===0x4e&&bytes[3]===0x47?'image/png':bytes.length>12&&String.fromCharCode(...bytes.subarray(0,4))==='RIFF'&&String.fromCharCode(...bytes.subarray(8,12))==='WEBP'?'image/webp':'';
+    const mime=actualMime||declaredMime;
+    const extension=mime==='image/png'?'png':mime==='image/webp'?'webp':mime==='image/jpeg'?'jpg':String(path).toLowerCase().split('.').pop().replace(/[^a-z0-9]/g,'')||'jpg';
+    return {bytes,extension};
+  }
+  function buildExportDocuments(data,records){
+    const headings=['輪次','原作者學生編號','原作者姓名','作品名稱','原作檔案','互評學生編號','互評學生姓名','互評遞交時間',
+      '同學：融合手法','同學：剪裁比例','同學：視覺焦點','同學：設計圖的傳意','AI：融合手法','AI：剪裁比例','AI：視覺焦點','AI：設計圖的傳意',
+      'AI 文字模型','AI 文字生成時間','改善圖檔案','改善圖說明','改善圖模型','改善圖生成時間'];
+    const rows=records.map(r=>[r.round_no,r.student_no,r.display_name,r.artwork_title,r.original_file,r.reviewer_no||'',r.reviewer_name||'',fullTime(r.review_submitted_at),
+      r.fusion,r.proportion,r.focus,r.communication,r.ai_fusion,r.ai_proportion,r.ai_focus,r.ai_communication,r.ai_model||'',fullTime(r.ai_generated_at),r.ai_image_file||'',r.ai_image_summary,r.ai_image_model||'',fullTime(r.ai_image_generated_at)]);
+    const csv='\ufeff'+[headings,...rows].map(row=>row.map(csvCell).join(',')).join('\r\n');
+    const articles=records.map(r=>`<article><h2>第 ${esc(r.round_no)} 輪｜${esc(r.student_no)} ${esc(r.display_name)}</h2><p class="meta">作品：${esc(r.artwork_title||'我的作品')}　原作遞交：${esc(fullTime(r.artwork_created_at)||'—')}</p><div class="images"><figure><img src="${esc(exportPath(r.original_file))}" alt="原作"><figcaption>原作</figcaption></figure>${r.ai_image_file?`<figure><img src="${esc(exportPath(r.ai_image_file))}" alt="AI 改善效果圖"><figcaption>AI 改善效果圖</figcaption></figure>`:'<p class="empty">AI 改善效果圖：尚未生成</p>'}</div><h3>同學評語及來源</h3><p class="meta">來源：${r.reviewer_no?`${esc(r.reviewer_no)} ${esc(r.reviewer_name)}`:'尚未分配或遞交'}　遞交時間：${esc(fullTime(r.review_submitted_at)||'—')}</p>${REVIEW_FIELDS.map(f=>`<h4>${esc(f.title)}</h4><p>${esc(r[f.key]||'尚未遞交')}</p>`).join('')}<h3>AI 原作評價</h3><p class="meta">模型：${esc(r.ai_model||'—')}　生成時間：${esc(fullTime(r.ai_generated_at)||'尚未生成')}</p>${REVIEW_FIELDS.map(f=>`<h4>${esc(f.title)}</h4><p>${esc(r['ai_'+f.key]||'尚未生成')}</p>`).join('')}<h3>AI 改善效果圖紀錄</h3><p class="meta">模型：${esc(r.ai_image_model||'—')}　生成時間：${esc(fullTime(r.ai_image_generated_at)||'尚未生成')}</p><p>${esc(r.ai_image_summary||'尚未生成')}</p></article>`).join('');
+    const html=`<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(data.class.name)}｜評語報告</title><style>body{max-width:1100px;margin:auto;padding:32px;font-family:-apple-system,BlinkMacSystemFont,"PingFang HK","Microsoft JhengHei",sans-serif;line-height:1.7;color:#172119;background:#f7f3eb}article{background:#fffdf8;padding:28px;margin:28px 0;border-top:4px solid #307927}h1,h2{font-family:serif}h3{margin-top:28px;color:#20591b}h4{margin:16px 0 2px;font-size:14px}p{white-space:pre-wrap}.meta{font-size:13px;color:#6d726a}.images{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px}figure{margin:0}img{width:100%;max-height:680px;object-fit:contain;background:#e9e5dc}figcaption{padding:8px 0;color:#6d726a}.empty{padding:30px;color:#6d726a}@media(max-width:600px){body{padding:16px}article{padding:18px}}</style></head><body><h1>${esc(data.class.name)}｜作品及評語報告</h1><p class="meta">班別代碼：${esc(data.class.join_code)}　範圍：${data.scope==='all'?'全部輪次':'目前一輪'}　匯出時間：${esc(fullTime(data.exported_at))}</p><p>同學評語保留互評學生編號及姓名作來源；AI 欄位記錄實際模型及生成時間。圖片以相對路徑連接，請將本報告與輪次資料夾一起保留。</p>${articles}</body></html>`;
+    return {csv,html};
+  }
+  async function downloadStudentPack(){
+    const d=state.data,rec=d?.received,art=d?.my_artwork;
+    if(!d||!rec?.ai_generated_at||!rec?.ai_image_generated_at||!rec.ai_image_path||!art||!d.assignment?.submitted_at){toast('請先完成本輪所有互評及改善圖階段。','error');return;}
+    if(state.studentExport.status==='working')return;
+    state.studentExport={status:'working',error:''};render();
+    try{
+      if(!window.fflate?.zipSync)throw new Error('ZIP 元件未能載入，請重新整理後再試。');
+      const original=await exportImage(art.image_path,'你的原作');
+      const improved=await exportImage(rec.ai_image_path,'你的 AI 改善圖');
+      const originalName=`原作.${original.extension}`,improvedName=`AI改善效果圖.${improved.extension}`;
+      const headings=['輪次','學生編號','姓名','作品名稱','評語來源','互評遞交時間','同學：融合手法','同學：剪裁比例','同學：視覺焦點','同學：設計圖的傳意','AI：融合手法','AI：剪裁比例','AI：視覺焦點','AI：設計圖的傳意','AI 文字模型','AI 文字生成時間','改善圖說明','改善圖模型','改善圖生成時間'];
+      const row=[d.round.round_no,d.student.student_no,d.student.display_name,art.title,'隨機互評同學（匿名）',fullTime(rec.submitted_at),peerValue(rec,'fusion'),peerValue(rec,'proportion'),peerValue(rec,'focus'),peerValue(rec,'communication'),rec.ai_fusion,rec.ai_proportion,rec.ai_focus,rec.ai_communication,rec.ai_model||'',fullTime(rec.ai_generated_at),rec.ai_image_summary,rec.ai_image_model||'',fullTime(rec.ai_image_generated_at)];
+      const csv='\ufeff'+[headings,row].map(values=>values.map(csvCell).join(',')).join('\r\n');
+      const html=`<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>我的作品及評語｜第 ${esc(d.round.round_no)} 輪</title><style>body{max-width:900px;margin:auto;padding:28px;font-family:-apple-system,BlinkMacSystemFont,"PingFang HK","Microsoft JhengHei",sans-serif;line-height:1.75;color:#172119;background:#f7f3eb}main{background:#fffdf8;padding:28px;border-top:4px solid #307927}h1,h2{font-family:serif}h2{margin-top:28px;color:#20591b}h3{font-size:14px;margin:16px 0 2px}p{white-space:pre-wrap}.meta{font-size:13px;color:#6d726a}.images{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:18px}figure{margin:0}img{width:100%;max-height:650px;object-fit:contain;background:#e9e5dc}figcaption{padding:8px 0;color:#6d726a}@media(max-width:600px){body{padding:14px}main{padding:18px}}</style></head><body><main><h1>我的作品及評語</h1><p class="meta">${esc(d.class.name)}｜第 ${esc(d.round.round_no)} 輪<br>學生：${esc(d.student.student_no)} ${esc(d.student.display_name)}<br>作品：${esc(art.title)}</p><div class="images"><figure><img src="${esc(encodeURIComponent(originalName))}" alt="我的原作"><figcaption>我的原作</figcaption></figure><figure><img src="${esc(encodeURIComponent(improvedName))}" alt="AI 改善效果圖"><figcaption>AI 改善效果圖</figcaption></figure></div><h2>同學的四部分觀察</h2><p class="meta">來源：隨機互評同學（匿名）｜遞交時間：${esc(fullTime(rec.submitted_at))}</p>${REVIEW_FIELDS.map(f=>`<h3>${esc(f.title)}</h3><p>${esc(peerValue(rec,f.key))}</p>`).join('')}<h2>AI 原作評價</h2><p class="meta">模型：${esc(rec.ai_model||'—')}｜生成時間：${esc(fullTime(rec.ai_generated_at))}</p>${REVIEW_FIELDS.map(f=>`<h3>${esc(f.title)}</h3><p>${esc(rec['ai_'+f.key])}</p>`).join('')}<h2>AI 改善效果圖紀錄</h2><p class="meta">模型：${esc(rec.ai_image_model||'—')}｜生成時間：${esc(fullTime(rec.ai_image_generated_at))}</p><p>${esc(rec.ai_image_summary||'—')}</p></main></body></html>`;
+      const zipped=window.fflate.zipSync({[originalName]:original.bytes,[improvedName]:improved.bytes,'我的評語紀錄.csv':new TextEncoder().encode(csv),'我的評語報告.html':new TextEncoder().encode(html)},{level:0});
+      const blob=new Blob([zipped],{type:'application/zip'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+      a.href=url;a.download=`${safeFileName(d.class.join_code)}_${safeFileName(d.student.student_no)}_第${String(d.round.round_no).padStart(2,'0')}輪_我的評語.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+      state.studentExport={status:'done',error:''};render();toast('你的評語及改善圖 ZIP 已開始下載。');
+    }catch(e){state.studentExport={status:'error',error:e.message||'下載未完成，請稍後重試。'};render();}
+  }
+
+  async function downloadTeacherExport(){
+    if(state.export.status==='working')return;
+    const scope=$('#export-all').checked?'all':'current',s=state.session;
+    state.export={status:'working',error:'',progress:'正在向雲端讀取評語紀錄……'};
+    $('#export-form').querySelectorAll('input,button').forEach(el=>el.disabled=true);
+    $('#export-status').textContent=state.export.progress;$('#export-error').textContent='';
+    try{
+      if(!window.fflate?.Zip||!window.fflate?.ZipPassThrough)throw new Error('ZIP 元件未能載入，請重新整理後再試。');
+      const data=await rpc('get_teacher_export',{p_join_code:s.classCode,p_pin:s.pin,p_round_id:scope==='current'?state.teacherData?.round?.id:null});
+      const records=data.records||[];if(!records.length)throw new Error('所選範圍尚未有作品，沒有可匯出的紀錄。');
+      const chunks=[];
+      await new Promise((resolve,reject)=>{
+        const zip=new window.fflate.Zip((error,chunk,final)=>{if(error){reject(error);return;}chunks.push(chunk);if(final)resolve();});
+        const add=(path,content)=>{const entry=new window.fflate.ZipPassThrough(path);zip.add(entry);entry.push(typeof content==='string'?new TextEncoder().encode(content):content,true);};
+        (async()=>{
+          for(let i=0;i<records.length;i++){
+            const r=records[i],folder=`第${String(r.round_no).padStart(2,'0')}輪/${safeFileName(r.student_no)}_${safeFileName(r.display_name)}`;
+            $('#export-status').textContent=`正在下載 ${i+1}／${records.length}：${r.student_no} ${r.display_name} 的原作……`;
+            const original=await exportImage(r.image_path,`${r.student_no} ${r.display_name} 的原作`);
+            r.original_file=`${folder}/原作.${original.extension}`;add(r.original_file,original.bytes);
+            if(r.ai_image_path){
+              $('#export-status').textContent=`正在下載 ${i+1}／${records.length}：${r.student_no} ${r.display_name} 的改善圖……`;
+              const improved=await exportImage(r.ai_image_path,`${r.student_no} ${r.display_name} 的改善圖`);
+              r.ai_image_file=`${folder}/AI改善效果圖.${improved.extension}`;add(r.ai_image_file,improved.bytes);
+            }else r.ai_image_file='';
+          }
+          $('#export-status').textContent='正在整理 HTML 評語報告及 CSV 紀錄……';
+          const documents=buildExportDocuments(data,records);add('評語紀錄.csv',documents.csv);add('評語報告.html',documents.html);zip.end();
+        })().catch(reject);
+      });
+      const blob=new Blob(chunks,{type:'application/zip'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+      a.href=url;a.download=`${safeFileName(data.class.join_code)}_${scope==='all'?'全部輪次':'目前一輪'}_${new Date().toISOString().slice(0,10)}.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+      state.export={status:'done',error:'',progress:''};$('#export-status').textContent=`已完成：${records.length} 份作品，ZIP 已開始下載。`;$('#export-form').querySelectorAll('input,button').forEach(el=>el.disabled=false);$('#export-current').disabled=!state.teacherData?.round?.id;toast('作品及評語 ZIP 已製作完成。');
+    }catch(e){
+      state.export={status:'error',error:e.message,progress:''};$('#export-status').textContent='匯出未完成；請處理錯誤後重新下載，避免使用不完整的 ZIP。';$('#export-error').textContent=e.message;
+      $('#export-form').querySelectorAll('input,button').forEach(el=>el.disabled=false);$('#export-current').disabled=!state.teacherData?.round?.id;
+    }
+  }
+
   function renderTeacher(){
     const d=state.teacherData;if(!d)return;const r=d.round,students=d.students||[];
     const uploads=students.filter(s=>s.has_artwork).length,reviews=students.filter(s=>s.review_status==='submitted').length;
     const active=['collecting','reviewing'].includes(r?.status);
     const statusText=!r?'尚未開始':r.status==='collecting'?'作品上載中':r.status==='reviewing'?'同儕互評中':'本輪已完結';
     const rows=students.map(s=>`<tr><td><strong>${esc(s.student_no)}</strong></td><td>${esc(s.display_name)}${s.id.startsWith('bot-')&&!LIVE?' <span class="side-meta">（示例）</span>':''}</td><td><span class="status-tag ${s.has_artwork?'done':'waiting'}">${s.has_artwork?'已上載':'未上載'}</span></td><td><span class="status-tag ${s.review_status==='submitted'?'done':s.review_status==='assigned'?'active':'waiting'}">${s.review_status==='submitted'?'已遞交意見':s.review_status==='assigned'?'互評進行中':'尚未分配'}</span></td></tr>`).join('');
-    $('#main').innerHTML=`<div class="app-shell"><div class="app-topline"><div><p class="eyebrow">TEACHER CONSOLE</p><h1>${esc(d.class.name)}</h1><p>${esc(statusText)} · 每 10 秒自動更新</p></div><div class="user-actions"><button class="outline-button compact" data-action="logout">離開 <span>↗</span></button></div></div>${connectionHTML()}${errorHTML()}<div class="class-code-box"><span class="kicker">學生班別代碼</span><strong>${esc(d.class.join_code)}</strong><button class="outline-button small-button" data-action="copy-code" data-code="${esc(d.class.join_code)}">複製代碼</button></div><div class="teacher-stats"><div class="stat timer-stat"><strong>${r?.status==='collecting'?`<span class="timer" data-deadline="${esc(r.submission_ends_at)}">--:--</span>`:esc(statusText)}</strong><span>${r?.status==='collecting'?'距離上載截止':'目前活動狀態'}</span></div><div class="stat"><strong>${students.length}</strong><span>已加入學生</span></div><div class="stat"><strong>${uploads}<small style="font-size:16px;color:var(--muted)">／${students.length}</small></strong><span>已上載作品</span></div><div class="stat"><strong>${reviews}<small style="font-size:16px;color:var(--muted)">／${uploads}</small></strong><span>已完成互評</span></div></div><div class="teacher-controls"><div>${!active?`<label class="field-label" for="round-duration">下一輪上載時限（分鐘）</label><input id="round-duration" type="number" min="1" max="120" value="${d.class.duration_minutes||15}" style="width:150px">`:`<p>${r.status==='collecting'?'倒數完結後，系統會以伺服器時間自動隨機分配，不會分到自己的作品。':'學生正在填寫四部分意見；全部完成後，本輪會自動完結。'}</p>`}</div><div class="control-buttons">${!active?`<button class="primary-button" data-action="start-round">開始 ${r?'新一輪':'第一輪'} <span>→</span></button>`:''}${r?.status==='collecting'?`<button class="secondary-button" data-action="close-round">提前截止並分配</button>`:''}${r?.status==='reviewing'?`<button class="danger-button" data-action="complete-round">結束本輪互評</button>`:''}</div></div><section><div class="section-heading"><div><span class="kicker">LIVE PROGRESS</span><h2>學生進度</h2></div><button class="text-button" data-action="refresh-teacher">重新整理 ↻</button></div><div class="student-table-wrap">${students.length?`<table class="student-table"><thead><tr><th>學生編號</th><th>姓名</th><th>作品</th><th>互評意見</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty-class">學生以班別代碼及學生編號加入後，進度會顯示在這裡。</div>`}</div></section></div>`;
+    $('#main').innerHTML=`<div class="app-shell"><div class="app-topline"><div><p class="eyebrow">TEACHER CONSOLE</p><h1>${esc(d.class.name)}</h1><p>${esc(statusText)} · 每 10 秒自動更新</p></div><div class="user-actions"><button class="outline-button compact" data-action="logout">離開 <span>↗</span></button></div></div>${connectionHTML()}${errorHTML()}<div class="class-code-box"><span class="kicker">學生班別代碼</span><strong>${esc(d.class.join_code)}</strong><button class="outline-button small-button" data-action="copy-code" data-code="${esc(d.class.join_code)}">複製代碼</button></div><div class="teacher-stats"><div class="stat timer-stat"><strong>${r?.status==='collecting'?`<span class="timer" data-deadline="${esc(r.submission_ends_at)}">--:--</span>`:esc(statusText)}</strong><span>${r?.status==='collecting'?'距離上載截止':'目前活動狀態'}</span></div><div class="stat"><strong>${students.length}</strong><span>已加入學生</span></div><div class="stat"><strong>${uploads}<small style="font-size:16px;color:var(--muted)">／${students.length}</small></strong><span>已上載作品</span></div><div class="stat"><strong>${reviews}<small style="font-size:16px;color:var(--muted)">／${uploads}</small></strong><span>已完成互評</span></div></div><div class="teacher-controls"><div>${!active?`<label class="field-label" for="round-duration">下一輪上載時限（分鐘）</label><input id="round-duration" type="number" min="1" max="120" value="${d.class.duration_minutes||15}" style="width:150px">`:`<p>${r.status==='collecting'?'倒數完結後，系統會以伺服器時間自動隨機分配，不會分到自己的作品。':'學生正在填寫四部分意見；全部完成後，本輪會自動完結。'}</p>`}</div><div class="control-buttons">${!active?`<button class="primary-button" data-action="start-round">開始 ${r?'新一輪':'第一輪'} <span>→</span></button>`:''}${r?.status==='collecting'?`<button class="secondary-button" data-action="close-round">提前截止並分配</button>`:''}${r?.status==='reviewing'?`<button class="danger-button" data-action="complete-round">結束本輪互評</button>`:''}</div></div><section><div class="section-heading"><div><span class="kicker">LIVE PROGRESS</span><h2>學生進度</h2></div><div class="teacher-table-actions"><button class="primary-button small-button" data-action="open-export">下載作品及評語</button><button class="text-button" data-action="refresh-teacher">重新整理 ↻</button></div></div><div class="student-table-wrap">${students.length?`<table class="student-table"><thead><tr><th>學生編號</th><th>姓名</th><th>作品</th><th>互評意見</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty-class">學生以班別代碼及學生編號加入後，進度會顯示在這裡。</div>`}</div></section></div>`;
     updateTimer();
   }
   function render(){
@@ -380,6 +511,9 @@
     if(action==='go-home'){if(state.session){state.view=state.session.role;render();}else{state.view='home';render();window.scrollTo({top:0,behavior:'smooth'});}}
     if(action==='show-guide')$('#guide-dialog').showModal();
     if(action==='close-guide')$('#guide-dialog').close();
+    if(action==='open-export')openTeacherExport();
+    if(action==='close-export'&&state.export.status!=='working')$('#export-dialog').close();
+    if(action==='confirm-export')await downloadTeacherExport();
     if(action==='teacher-entry'){state.view='home';state.homeMode='teacher';state.error='';render();setTimeout(()=>$('.entry-panel')?.scrollIntoView({behavior:'smooth',block:'center'}),20);}
     if(action==='home-student'){state.homeMode='student';state.error='';render();}
     if(action==='home-teacher'){state.homeMode='teacher';state.error='';render();}
@@ -413,6 +547,9 @@
       area.focus();
     }
     if(action==='retry-ai'){const rec=state.data?.received;if(rec)generateAI(rec.id||rec.submitted_at);}
+    if(action==='generate-ai-image'){const rec=state.data?.received;if(rec)await generateAIImage(rec.id||rec.submitted_at);}
+    if(action==='download-student-pack')await downloadStudentPack();
+    if(action==='refresh-student')await refreshStudent();
   });
   document.addEventListener('submit',async e=>{
     e.preventDefault();

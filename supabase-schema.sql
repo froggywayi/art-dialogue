@@ -58,6 +58,11 @@ create table if not exists public.reviews (
   ai_started_at timestamptz,
   ai_generated_at timestamptz,
   ai_model text,
+  ai_image_path text not null default '',
+  ai_image_summary text not null default '',
+  ai_image_started_at timestamptz,
+  ai_image_generated_at timestamptz,
+  ai_image_model text,
   submitted_at timestamptz,
   unique(round_id, reviewer_id)
 );
@@ -73,6 +78,11 @@ alter table public.reviews add column if not exists ai_communication text not nu
 alter table public.reviews add column if not exists ai_started_at timestamptz;
 alter table public.reviews add column if not exists ai_generated_at timestamptz;
 alter table public.reviews add column if not exists ai_model text;
+alter table public.reviews add column if not exists ai_image_path text not null default '';
+alter table public.reviews add column if not exists ai_image_summary text not null default '';
+alter table public.reviews add column if not exists ai_image_started_at timestamptz;
+alter table public.reviews add column if not exists ai_image_generated_at timestamptz;
+alter table public.reviews add column if not exists ai_image_model text;
 
 create index if not exists idx_students_class on public.students(class_id);
 create index if not exists idx_artworks_round on public.artworks(round_id);
@@ -192,7 +202,9 @@ begin
       'id',rv.id,'appreciation',rv.appreciation,'improvement',rv.improvement,
       'fusion',rv.fusion,'proportion',rv.proportion,'focus',rv.focus,'communication',rv.communication,
       'ai_fusion',rv.ai_fusion,'ai_proportion',rv.ai_proportion,'ai_focus',rv.ai_focus,'ai_communication',rv.ai_communication,
-      'ai_started_at',rv.ai_started_at,'ai_generated_at',rv.ai_generated_at,'ai_model',rv.ai_model,'submitted_at',rv.submitted_at
+      'ai_started_at',rv.ai_started_at,'ai_generated_at',rv.ai_generated_at,'ai_model',rv.ai_model,
+      'ai_image_path',rv.ai_image_path,'ai_image_summary',rv.ai_image_summary,'ai_image_started_at',rv.ai_image_started_at,
+      'ai_image_generated_at',rv.ai_image_generated_at,'ai_image_model',rv.ai_image_model,'submitted_at',rv.submitted_at
     )
     into v_received
     from public.reviews rv join public.artworks a on a.id=rv.artwork_id
@@ -259,7 +271,7 @@ end $$;
 -- 學生 token 就是 AI 函式的權限邊界：只能為自己的作品取得及保存建議。
 create or replace function public.prepare_ai_feedback(p_token text)
 returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
-declare v_student public.students%rowtype; v_class public.classes%rowtype; v_review public.reviews%rowtype; v_title text;
+declare v_student public.students%rowtype; v_class public.classes%rowtype; v_review public.reviews%rowtype; v_title text; v_image_path text;
 begin
   select * into v_student from public.students where token=p_token;
   if not found then raise exception '登入紀錄已失效'; end if;
@@ -270,16 +282,13 @@ begin
   where rv.round_id=v_class.current_round_id and a.student_id=v_student.id
   for update of rv;
   if not found or v_review.submitted_at is null then raise exception '同學意見尚未遞交'; end if;
-  select a.title into v_title from public.artworks a where a.id=v_review.artwork_id;
+  select a.title,a.image_path into v_title,v_image_path from public.artworks a where a.id=v_review.artwork_id;
   if v_review.ai_generated_at is not null then return json_build_object('status','already_generated'); end if;
   if v_review.ai_started_at is not null and v_review.ai_started_at>now()-interval '5 minutes' then
     return json_build_object('status','generating');
   end if;
   update public.reviews set ai_started_at=now() where id=v_review.id;
-  return json_build_object(
-    'status','ready','artwork_title',v_title,'fusion',v_review.fusion,'proportion',v_review.proportion,
-    'focus',v_review.focus,'communication',v_review.communication
-  );
+  return json_build_object('status','ready','artwork_title',v_title,'image_path',v_image_path);
 end $$;
 
 create or replace function public.save_ai_feedback(
@@ -317,6 +326,102 @@ begin
   from public.artworks a
   where a.id=rv.artwork_id and rv.round_id=v_class.current_round_id and a.student_id=v_student.id and rv.ai_generated_at is null;
   return json_build_object('ok',true);
+end $$;
+
+create or replace function public.prepare_ai_image(p_token text)
+returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
+declare v_student public.students%rowtype; v_class public.classes%rowtype; v_review public.reviews%rowtype; v_art public.artworks%rowtype;
+begin
+  select * into v_student from public.students where token=p_token;
+  if not found then raise exception '登入紀錄已失效'; end if;
+  select * into v_class from public.classes where id=v_student.class_id;
+  select rv.* into v_review
+  from public.reviews rv join public.artworks a on a.id=rv.artwork_id
+  where rv.round_id=v_class.current_round_id and a.student_id=v_student.id
+  for update of rv;
+  if not found or v_review.submitted_at is null then raise exception '同學意見尚未遞交'; end if;
+  if v_review.ai_generated_at is null then raise exception '請先完成 AI 原作評價'; end if;
+  select * into v_art from public.artworks where id=v_review.artwork_id;
+  if v_review.ai_image_generated_at is not null then return json_build_object('status','already_generated','image_path',v_review.ai_image_path); end if;
+  if v_review.ai_image_started_at is not null and v_review.ai_image_started_at>now()-interval '5 minutes' then
+    return json_build_object('status','generating');
+  end if;
+  update public.reviews set ai_image_started_at=now() where id=v_review.id;
+  return json_build_object(
+    'status','ready','artwork_title',v_art.title,'image_path',v_art.image_path,
+    'join_code',v_class.join_code,'student_id',v_student.id,'round_id',v_review.round_id,
+    'fusion',v_review.fusion,'proportion',v_review.proportion,'focus',v_review.focus,'communication',v_review.communication,
+    'ai_fusion',v_review.ai_fusion,'ai_proportion',v_review.ai_proportion,'ai_focus',v_review.ai_focus,'ai_communication',v_review.ai_communication
+  );
+end $$;
+
+create or replace function public.save_ai_image(
+  p_token text, p_image_path text, p_summary text, p_model text
+) returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
+declare v_student public.students%rowtype; v_class public.classes%rowtype; v_review public.reviews%rowtype;
+begin
+  select * into v_student from public.students where token=p_token;
+  if not found then raise exception '登入紀錄已失效'; end if;
+  select * into v_class from public.classes where id=v_student.class_id;
+  if p_image_path not like (v_class.join_code||'/'||v_student.id::text||'/ai-%') or length(p_image_path)>500 then
+    raise exception '改善圖路徑不正確';
+  end if;
+  if length(p_summary)>2000 then raise exception '改善圖說明過長'; end if;
+  update public.reviews rv set ai_image_path=p_image_path,ai_image_summary=trim(coalesce(p_summary,'')),
+    ai_image_generated_at=now(),ai_image_started_at=null,ai_image_model=left(coalesce(p_model,'Gemini'),100)
+  from public.artworks a
+  where a.id=rv.artwork_id and rv.round_id=v_class.current_round_id and a.student_id=v_student.id
+    and rv.submitted_at is not null and rv.ai_generated_at is not null
+    and rv.ai_image_started_at is not null and rv.ai_image_generated_at is null
+  returning rv.* into v_review;
+  if not found then raise exception '改善圖已被更新或目前不能保存'; end if;
+  return json_build_object('generated_at',v_review.ai_image_generated_at,'image_path',v_review.ai_image_path);
+end $$;
+
+create or replace function public.reset_ai_image(p_token text)
+returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
+declare v_student public.students%rowtype; v_class public.classes%rowtype;
+begin
+  select * into v_student from public.students where token=p_token;
+  if not found then raise exception '登入紀錄已失效'; end if;
+  select * into v_class from public.classes where id=v_student.class_id;
+  update public.reviews rv set ai_image_started_at=null
+  from public.artworks a
+  where a.id=rv.artwork_id and rv.round_id=v_class.current_round_id and a.student_id=v_student.id and rv.ai_image_generated_at is null;
+  return json_build_object('ok',true);
+end $$;
+
+create or replace function public.get_teacher_export(
+  p_join_code text, p_pin text, p_round_id uuid default null
+) returns json language plpgsql security definer set search_path = public, pg_temp, extensions as $$
+declare v_class public.classes%rowtype; v_records json;
+begin
+  select * into v_class from public.classes where join_code=upper(trim(p_join_code));
+  if not found or v_class.teacher_pin_hash<>extensions.crypt(p_pin,v_class.teacher_pin_hash) then raise exception '班別代碼或老師 PIN 不正確'; end if;
+  if p_round_id is not null and not exists(select 1 from public.rounds where id=p_round_id and class_id=v_class.id) then
+    raise exception '找不到指定輪次';
+  end if;
+  select coalesce(json_agg(json_build_object(
+    'round_id',r.id,'round_no',r.round_no,'round_status',r.status,
+    'artwork_id',a.id,'artwork_title',a.title,'image_path',a.image_path,'artwork_created_at',a.created_at,
+    'student_no',author.student_no,'display_name',author.display_name,
+    'reviewer_no',reviewer.student_no,'reviewer_name',reviewer.display_name,'review_submitted_at',rv.submitted_at,
+    'fusion',coalesce(rv.fusion,''),'proportion',coalesce(rv.proportion,''),'focus',coalesce(rv.focus,''),'communication',coalesce(rv.communication,''),
+    'ai_fusion',coalesce(rv.ai_fusion,''),'ai_proportion',coalesce(rv.ai_proportion,''),'ai_focus',coalesce(rv.ai_focus,''),'ai_communication',coalesce(rv.ai_communication,''),
+    'ai_generated_at',rv.ai_generated_at,'ai_model',rv.ai_model,
+    'ai_image_path',coalesce(rv.ai_image_path,''),'ai_image_summary',coalesce(rv.ai_image_summary,''),
+    'ai_image_generated_at',rv.ai_image_generated_at,'ai_image_model',rv.ai_image_model
+  ) order by r.round_no,author.student_no),'[]'::json) into v_records
+  from public.artworks a
+  join public.rounds r on r.id=a.round_id
+  join public.students author on author.id=a.student_id
+  left join public.reviews rv on rv.artwork_id=a.id
+  left join public.students reviewer on reviewer.id=rv.reviewer_id
+  where r.class_id=v_class.id and (p_round_id is null or r.id=p_round_id);
+  return json_build_object(
+    'class',json_build_object('id',v_class.id,'name',v_class.name,'join_code',v_class.join_code),
+    'scope',case when p_round_id is null then 'all' else 'current' end,'records',v_records,'exported_at',now()
+  );
 end $$;
 
 create or replace function public.get_teacher_state(p_join_code text, p_pin text)
@@ -391,6 +496,10 @@ grant execute on function public.submit_review_v2(text,text,text,text,text) to a
 grant execute on function public.prepare_ai_feedback(text) to anon,authenticated;
 grant execute on function public.save_ai_feedback(text,text,text,text,text,text) to anon,authenticated;
 grant execute on function public.reset_ai_feedback(text) to anon,authenticated;
+grant execute on function public.prepare_ai_image(text) to anon,authenticated;
+grant execute on function public.save_ai_image(text,text,text,text) to anon,authenticated;
+grant execute on function public.reset_ai_image(text) to anon,authenticated;
+grant execute on function public.get_teacher_export(text,text,uuid) to anon,authenticated;
 grant execute on function public.get_teacher_state(text,text) to anon,authenticated;
 grant execute on function public.start_round(text,text,integer) to anon,authenticated;
 grant execute on function public.close_submissions(text,text) to anon,authenticated;
