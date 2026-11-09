@@ -19,6 +19,66 @@ const json = (body: unknown, status = 200, origin = '') =>
     headers: { 'Content-Type': 'application/json; charset=utf-8', ...corsHeaders(origin) },
   });
 
+const base64Url = (bytes: Uint8Array) => {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+};
+
+const encodeJson = (value: unknown) => base64Url(new TextEncoder().encode(JSON.stringify(value)));
+
+type ServiceAccount = { client_email: string; private_key: string; project_id?: string };
+let googleToken: { value: string; expiresAt: number } | null = null;
+
+const getGoogleAccessToken = async (serviceAccount: ServiceAccount) => {
+  if (googleToken && googleToken.expiresAt > Date.now() + 60_000) return googleToken.value;
+
+  const now = Math.floor(Date.now() / 1000);
+  const unsignedJwt = `${encodeJson({ alg: 'RS256', typ: 'JWT' })}.${encodeJson({
+    iss: serviceAccount.client_email,
+    scope: 'https://www.googleapis.com/auth/cloud-platform',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  })}`;
+  const pem = serviceAccount.private_key.replace(/\\n/g, '\n');
+  const pkcs8 = pem
+    .replace('-----BEGIN PRIVATE KEY-----', '')
+    .replace('-----END PRIVATE KEY-----', '')
+    .replace(/\s/g, '');
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    Uint8Array.from(atob(pkcs8), (char) => char.charCodeAt(0)),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    key,
+    new TextEncoder().encode(unsignedJwt),
+  );
+  const assertion = `${unsignedJwt}.${base64Url(new Uint8Array(signature))}`;
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion,
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || typeof data.access_token !== 'string') {
+    throw new Error('Google Cloud 服務帳戶驗證失敗。');
+  }
+  googleToken = {
+    value: data.access_token,
+    expiresAt: Date.now() + Math.max(60, Number(data.expires_in) || 3600) * 1000,
+  };
+  return googleToken.value;
+};
+
 Deno.serve(async (req) => {
   const requestOrigin = req.headers.get('Origin') || '';
   if (requestOrigin && !ALLOWED_ORIGINS.has(requestOrigin)) {
@@ -30,9 +90,24 @@ Deno.serve(async (req) => {
 
   const apikey = req.headers.get('apikey');
   const supabaseUrl = Deno.env.get('SUPABASE_URL')?.replace(/\/$/, '');
-  const geminiKey = Deno.env.get('GEMINI_API_KEY');
-  const model = Deno.env.get('GEMINI_MODEL') || 'gemini-2.5-flash';
-  if (!apikey || !supabaseUrl || !geminiKey) return json({ error: 'AI 服務尚未完成設定。' }, 503, origin);
+  const project = Deno.env.get('GOOGLE_CLOUD_PROJECT');
+  const location = Deno.env.get('GOOGLE_CLOUD_LOCATION') || 'global';
+  const serviceAccountJson = Deno.env.get('GOOGLE_SERVICE_ACCOUNT_JSON');
+  const model = Deno.env.get('GEMINI_MODEL') || 'gemini-3.5-flash-lite';
+  if (!apikey || !supabaseUrl || !project || !serviceAccountJson) {
+    return json({ error: 'AI 服務尚未完成設定。' }, 503, origin);
+  }
+
+  let serviceAccount: ServiceAccount;
+  try {
+    serviceAccount = JSON.parse(serviceAccountJson);
+    if (!serviceAccount.client_email || !serviceAccount.private_key) throw new Error('missing fields');
+    if (serviceAccount.project_id && serviceAccount.project_id !== project) {
+      throw new Error('project mismatch');
+    }
+  } catch {
+    return json({ error: 'AI 服務尚未完成設定。' }, 503, origin);
+  }
 
   let token = '';
   try {
@@ -75,17 +150,20 @@ ${JSON.stringify({
 3. 不要聲稱親自看見作品，不要重抄整段意見，不要評分，不要提及學生身份。
 4. 語氣支持、清楚，避免空泛讚美；若意見已很好，可提供深化方向。`;
 
+    const accessToken = await getGoogleAccessToken(serviceAccount);
+    const vertexHost = location === 'global'
+      ? 'aiplatform.googleapis.com'
+      : `${encodeURIComponent(location)}-aiplatform.googleapis.com`;
     const geminiResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      `https://${vertexHost}/v1/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}:generateContent`,
       {
         method: 'POST',
-        headers: { 'x-goog-api-key': geminiKey, 'Content-Type': 'application/json' },
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: '你是熟悉中學視覺藝術與服裝設計的教學助理，只根據互評文字給原作者建設性建議。' }] },
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           generationConfig: {
-            temperature: 0.4,
-            maxOutputTokens: 1600,
+            maxOutputTokens: 2000,
             responseMimeType: 'application/json',
             responseSchema: {
               type: 'OBJECT',
@@ -98,10 +176,9 @@ ${JSON.stringify({
               required: ['fusion', 'proportion', 'focus', 'communication'],
               propertyOrdering: ['fusion', 'proportion', 'focus', 'communication'],
             },
-            thinkingConfig: { thinkingBudget: 0 },
           },
         }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(45000),
       },
     );
     const geminiData = await geminiResponse.json().catch(() => ({}));

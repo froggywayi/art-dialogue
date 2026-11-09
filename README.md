@@ -75,25 +75,30 @@ python3 -m http.server 8080
 修改 `config.js` 後需要重新 commit；Supabase 設定完成前，網站會停留在本機示範模式。
 
 
-### 5. 設定 Gemini AI 建議
+### 5. 設定 Google Cloud Vertex AI 建議
 
-四題互評只需上述 Supabase SQL 即可運作；真正的 AI 建議還需要以下後端設定：
+四題互評只需上述 Supabase SQL 即可運作；真正的 AI 建議還需要以下後端設定。本專案使用 **Google Cloud Vertex AI**，費用由已連結的 Cloud Billing 帳戶按用量計算，不使用 AI Studio Prepay credits。
 
-1. 在 [Google AI Studio](https://aistudio.google.com/api-keys) 建立供 Gemini API 使用的 API key。金鑰屬於帳戶秘密，不要貼進 `config.js`、GitHub 或對話。
-2. 在 Supabase 專案的 **Edge Functions → Secrets** 加入：
-   - `GEMINI_API_KEY`：剛建立的 Gemini API key
-   - `GEMINI_MODEL`：`gemini-2.5-flash`
-3. 以 Supabase CLI 登入後，在專案根目錄部署：
+1. 在 Google Cloud Console 選擇要用於本網站的專案，啟用 **Vertex AI API**（`aiplatform.googleapis.com`），並確認專案已連結帳單帳戶。
+2. 到 **IAM 與管理 → 服務帳戶**，建立只供本網站使用的服務帳戶，例如 `art-dialogue-gemini`。
+3. 只授予該服務帳戶 **Vertex AI User**（`roles/aiplatform.user`）角色；不要授予擁有者或編輯者。
+4. 為該服務帳戶建立並下載 JSON 金鑰。金鑰屬於帳戶秘密，不要貼進 `config.js`、GitHub 或對話。
+5. 在 Supabase 專案的 **Edge Functions → Secrets** 加入：
+   - `GOOGLE_CLOUD_PROJECT`：Google Cloud 的專案 ID（不是專案名稱或編號）
+   - `GOOGLE_CLOUD_LOCATION`：`global`
+   - `GOOGLE_SERVICE_ACCOUNT_JSON`：服務帳戶 JSON 金鑰的完整內容
+   - `GEMINI_MODEL`：`gemini-3.5-flash-lite`（可按 Cloud 專案可用的模型更換）
+6. 以 Supabase CLI 登入後，在專案根目錄部署：
 
 ```bash
 supabase functions deploy generate-feedback --project-ref 你的專案-ref
 ```
 
+舊版使用的 `GEMINI_API_KEY` 不再需要，可從 Supabase Secrets 刪除。若曾把舊金鑰用於其他地方，亦可在確認不再使用後到 Google Cloud Console 停用或刪除。
+
 `supabase/config.toml` 已把 `generate-feedback` 設為 `verify_jwt = false`，因為學生沒有 Supabase Auth 帳戶。函式會以學生 token 呼叫受限制的 SQL RPC 驗證身份，並限制允許的網站來源；若更改 GitHub Pages 網址，也要修改函式頂部的 `ALLOWED_ORIGINS`。
 
-**絕不要把 Gemini API key、Supabase secret key 或 service_role key 放進前端。** AI 結果只需生成一次，之後由資料庫讀回，不會因重新整理而重複收費或佔用配額。
-
-若 AI Studio 顯示 `prepayment credits are depleted` 或「預付額度用盡」，須在 Google AI Studio 為金鑰所屬專案補充可用額度，或改用有可用額度的 API key；Supabase 中的同學意見不會受影響。
+**絕不要把服務帳戶 JSON、Supabase secret key 或 service_role key 放進前端。** 服務帳戶只會在 Supabase 後端換取短期 Google OAuth token；學生不會取得私鑰或 Google 存取權杖。AI 結果只需生成一次，之後由資料庫讀回，不會因重新整理而重複收費或佔用配額。
 
 ## 建議課堂流程
 
