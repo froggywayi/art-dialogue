@@ -93,6 +93,8 @@ supabase functions deploy generate-feedback --project-ref 你的專案-ref
 
 **絕不要把 Gemini API key、Supabase secret key 或 service_role key 放進前端。** AI 結果只需生成一次，之後由資料庫讀回，不會因重新整理而重複收費或佔用配額。
 
+若 AI Studio 顯示 `prepayment credits are depleted` 或「預付額度用盡」，須在 Google AI Studio 為金鑰所屬專案補充可用額度，或改用有可用額度的 API key；Supabase 中的同學意見不會受影響。
+
 ## 建議課堂流程
 
 1. 老師建立班別，把班別代碼展示給學生。
