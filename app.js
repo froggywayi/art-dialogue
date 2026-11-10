@@ -95,7 +95,7 @@
     const mine=d.artworks.find(a=>a.round_id===r?.id&&a.student_id===s.id);
     let assignment=d.reviews.find(x=>x.round_id===r?.id&&x.reviewer_id===s.id);
     if(assignment){const a=d.artworks.find(x=>x.id===assignment.artwork_id);assignment={...assignment,artwork:a};}
-    let received=null;if(mine){const rev=d.reviews.find(x=>x.artwork_id===mine.id);if(rev?.submitted_at)received=rev;}
+    let received=null;if(mine&&assignment?.submitted_at){const rev=d.reviews.find(x=>x.artwork_id===mine.id);if(rev?.submitted_at)received=rev;}
     saveDemo(d);
     return {class:{id:c.id,name:c.name,join_code:c.join_code,duration_minutes:c.duration_minutes},student:{id:s.id,student_no:s.student_no,display_name:s.display_name},round:r||null,my_artwork:mine||null,assignment:assignment||null,received:received||null,server_now:nowISO()};
   }
@@ -114,6 +114,10 @@
   }
 
   // ----- 雲端 API -----
+  function sanitizeStudentData(data){
+    if(data&&!data.assignment?.submitted_at)data.received=null;
+    return data;
+  }
   async function rpc(name,args){const{data,error}=await db.rpc(name,args);if(error)throw new Error(error.message);return data;}
   function maybeGenerateAI(data){
     const rec=data?.received;if(!LIVE||!rec?.submitted_at)return;
@@ -138,7 +142,7 @@
   async function generateAIImage(key){
     const rec=state.data?.received;
     if(!rec||!rec.ai_generated_at||rec.ai_image_generated_at||state.aiImage.status==='loading')return;
-    if(!confirm('生成改善效果圖會把原作、同學四部分意見及 AI 四部分評價傳到 Google Cloud Vertex AI，並產生額外圖像生成用量。每份作品只需生成一次，結果會保存在雲端。確定生成？'))return;
+    if(!confirm('生成改善效果圖會把原作、同學四部分意見及 AI 四部分評價傳到 Google Cloud Vertex AI，並產生額外圖像生成用量。每輪每份作品只能成功生成一次，結果會保存在雲端。確定生成？'))return;
     const imageKey=key||rec.id||rec.submitted_at;
     state.aiImage={key:imageKey,status:'loading',error:''};render();
     try{
@@ -157,7 +161,7 @@
     if(!state.session||state.session.role!=='student')return;
     if(!silent)setLoading(true);
     try{
-      const data=LIVE?await rpc('get_student_state',{p_token:state.session.token}):demoStudentState(state.session);
+      const data=sanitizeStudentData(LIVE?await rpc('get_student_state',{p_token:state.session.token}):demoStudentState(state.session));
       const signature=JSON.stringify({round:data.round,art:data.my_artwork,assignment:data.assignment,received:data.received});
       state.data=data;store.set(KEYS.cache,{session:state.session,data});
       if(data.received?.ai_image_generated_at){const key=data.received.id||data.received.submitted_at;if(state.aiImage.key!==key||state.aiImage.status!=='done')state.aiImage={key,status:'done',error:''};}
@@ -283,10 +287,10 @@
             proportion:'上緊下鬆的比例鮮明，腰線位置清楚；下擺亦可嘗試更長短不對稱的變化。',
             focus:'腰封是搶眼的視覺主角，能從線條看出軟硬材質對比；袖口細節略多，可保留多一點留白。',
             communication:'整體線條清楚並附有材質標註，但背面的拼接結構尚未交代清楚。',
-            ai_fusion:'下一稿可保留雲肩作為傳統識別，再把衣身簡化成乾淨的現代直線，讓兩種語言主次更清楚。',
-            ai_proportion:'可先把腰線略為提高，並比較兩個下擺長度版本；用相同站姿畫出比例草圖，會更容易判斷視覺重心。',
-            ai_focus:'建議只保留腰封與領口兩個焦點，把袖口一組裝飾減半。再以軟薄內搭配挺硬腰封，強化材質層次。',
-            ai_communication:'可在背面增加局部放大圖，以虛線及箭嘴標示開合位置和拼接次序，並補上各裁片的布料名稱。',
+            ai_fusion:'有效｜雲肩保留清楚的傳統識別，與短版衣身形成對比。\n改善｜衣身可簡化成乾淨的現代直線，令兩種設計語言主次更清楚。',
+            ai_proportion:'有效｜腰線位置明確，上緊下鬆的輪廓容易辨認。\n改善｜可比較兩個下擺長度版本，判斷提高腰線後的視覺重心。',
+            ai_focus:'有效｜腰封與領口形成兩個明確焦點，主次容易掌握。\n改善｜袖口裝飾可減半，並以軟薄內搭配挺硬腰封強化層次。',
+            ai_communication:'有效｜正面輪廓及主要拼接線清楚，基本結構可讀。\n改善｜可補背面局部圖，以虛線及箭嘴標示開合位置和拼接次序。',
             ai_generated_at:nowISO(),ai_model:'本機示範建議',submitted_at:nowISO()
           });
         }
@@ -332,48 +336,65 @@
     if(state.preview)return `<div class="upload-preview"><div class="preview-canvas"><img src="${esc(state.preview)}" alt="待上載作品預覽"></div><div class="preview-meta"><span class="kicker">READY TO SUBMIT</span><strong>${esc(state.file?.name||'作品圖片')}</strong><p>${state.file?(state.file.size/1024/1024).toFixed(2):''} MB</p><p>遞交前請確認圖片方向及內容正確。</p><button class="outline-button small-button" data-action="clear-image">重新選擇</button></div></div><div class="field"><label for="artwork-title">作品名稱 <small>選填</small></label><input id="artwork-title" maxlength="100" placeholder="為作品命名"></div><div class="submit-row"><button class="primary-button" data-action="upload-artwork">確認遞交作品 <span>→</span></button><span class="save-hint">遞交後，截止前仍可重新上載。</span></div>`;
     return `<div class="upload-zone" id="upload-zone"><input id="artwork-file" type="file" accept="image/*" aria-label="選擇作品圖片"><div><svg class="upload-icon" viewBox="0 0 64 64" aria-hidden="true"><path d="M10 12h44v40H10z"/><circle cx="23" cy="24" r="5"/><path d="M12 46l14-14 10 10 7-7 10 11M32 4v17m-6-6l6 6 6-6"/></svg><strong>選擇或拍攝你的作品</strong><p>在 iPad 可從相片圖庫、相機或檔案選取</p><small>JPG、PNG、HEIC 等圖片 · 不超過 ${CFG.MAX_IMAGE_MB||10}MB</small></div></div><p class="form-note">請確保作品清晰、方向正確，並避免在圖片寫上不必要的個人資料。</p>${state.replacing?'<button class="text-button" data-action="cancel-replace">取消，保留原作品</button>':''}`;
   }
-  function uploadSubmittedContent(data){return `<div class="waiting-state"><div class="submitted-check">✓</div><h2>作品已安全上載</h2><p>遞交時間：${fmtTime(data.my_artwork.created_at)}。你可以留在這裡等待截止，系統會自動進入隨機互評。</p><div class="control-buttons" style="justify-content:center">${data.round?.status==='collecting'?`<button class="outline-button" data-action="replace-artwork">截止前重新上載</button>`:''}${!LIVE&&data.round?.status==='collecting'?`<button class="secondary-button" data-action="demo-close-student">示範：立即截止並分配</button>`:''}</div></div>`;}
+  function uploadSubmittedContent(data){
+    const art=data.my_artwork;
+    return `<div class="waiting-state upload-submitted"><div class="submitted-check">✓</div><h2>作品已安全上載</h2><p>遞交時間：${fmtTime(art.created_at)}。你可以留在這裡等待截止，系統會自動進入隨機互評。</p><figure class="submitted-artwork"><img src="${esc(imageUrl(art.image_path))}" alt="已上載的作品：${esc(art.title)}"><figcaption>${esc(art.title||'我的作品')}</figcaption></figure><div class="control-buttons" style="justify-content:center">${data.round?.status==='collecting'?`<button class="outline-button" data-action="replace-artwork">截止前重新上載</button>`:''}${!LIVE&&data.round?.status==='collecting'?`<button class="secondary-button" data-action="demo-close-student">示範：立即截止並分配</button>`:''}</div></div>`;
+  }
   function reviewContent(data){
     const a=data.assignment;if(!a)return waitingContent(data);
-    if(a.submitted_at)return `<div class="waiting-state"><div class="submitted-check">✓</div><h2>你的意見已送達</h2><p>遞交時間：${fmtTime(a.submitted_at)}。原作者現在可以閱讀你的四部分回應；你亦可在右方查看自己收到的意見及 AI 建議。</p></div>`;
+    if(a.submitted_at)return `<div class="waiting-state"><div class="submitted-check">✓</div><h2>你的意見已送達</h2><p>遞交時間：${fmtTime(a.submitted_at)}。你已完成第二步；當負責評價你作品的同學遞交後，即可在第三步收回意見。</p></div>`;
     const art=a.artwork;
     const prompts=REVIEW_FIELDS.map((f,i)=>{
       const value=state.draft[f.key]||'';
       const chips=f.chips.map(chip=>`<button type="button" class="suggestion-chip ${value.includes(chip)?'selected':''}" data-action="toggle-phrase" data-field="${f.key}" data-phrase="${esc(chip)}" aria-pressed="${value.includes(chip)}">${esc(chip)}</button>`).join('');
       return `<fieldset class="review-prompt"><legend><span class="prompt-number">${i+1}</span>${esc(f.title)}<span class="required-mark" aria-hidden="true">*</span></legend><p class="prompt-question">${esc(f.question)}</p><p class="field-help">${esc(f.help)}</p><div class="suggestion-group" aria-label="${esc(f.title)}建議字詞"><span class="suggestion-label">建議字詞 <small>按一下加入，再按可移除</small></span><div class="suggestion-chips">${chips}</div></div><label class="sr-only" for="${f.key}">${esc(f.title)}補充意見</label><textarea id="${f.key}" name="${f.key}" maxlength="2000" placeholder="${esc(f.placeholder)}" required>${esc(value)}</textarea><div class="char-count"><span data-count="${f.key}">${value.length}</span>／2000</div></fieldset>`;
     }).join('');
-    return `<div class="review-artwork"><img src="${esc(imageUrl(art.image_path))}" alt="獲隨機分配的同學作品：${esc(art.title)}"><span class="artwork-label">匿名同學作品</span></div><p class="kicker">YOUR RESPONSE</p><h2 style="font-family:var(--serif);font-weight:600">${esc(art.title||'同學的作品')}</h2><p class="panel-intro">先看整體，再看細節。你可以選擇建議字詞，再補充自己的觀察；也可以全部自行填寫。</p><form id="review-form">${prompts}<div class="draft-status">${Object.values(state.draft).some(Boolean)?'已載入此裝置上的四部分草稿':''}</div><div class="submit-row"><button class="primary-button" type="submit">遞交四部分意見 <span>→</span></button><span class="save-hint">遞交後不能修改，請先檢查內容。</span></div></form>`;
+    return `<div class="review-artwork"><img src="${esc(imageUrl(art.image_path))}" alt="獲隨機分配的同學作品：${esc(art.title)}"><span class="artwork-label">匿名同學作品</span></div><p class="kicker">YOUR RESPONSE</p><h2 class="response-title">我的意見</h2><p class="panel-intro">作品：${esc(art.title||'同學的作品')}。先看整體，再看細節。你可以選擇建議字詞，再補充自己的觀察；也可以全部自行填寫。完成這四部分後，才會解鎖你自己收到的意見。</p><form id="review-form">${prompts}<div class="draft-status">${Object.values(state.draft).some(Boolean)?'已載入此裝置上的四部分草稿':''}</div><div class="submit-row"><button class="primary-button" type="submit">遞交四部分意見 <span>→</span></button><span class="save-hint">遞交後不能修改，請先檢查內容。</span></div></form>`;
   }
 
+  function aiBullets(value){
+    const text=String(value||'').replace(/\s+(?=(?:有效|改善)\s*[｜|])/g,'\n');
+    return text.split(/\r?\n/).map(line=>line.trim().replace(/^(?:[-*•·]|\d+[.、)])\s*/,'')).filter(Boolean).map(line=>{
+      const match=line.match(/^(有效|改善)\s*[｜|：:]\s*(.*)$/);
+      if(!match)return `<li class="ai-bullet legacy"><span>${esc(line)}</span></li>`;
+      const effective=match[1]==='有效';
+      return `<li class="ai-bullet ${effective?'effective':'improvement'}"><strong>${effective?'有效':'改善'}</strong><span>${esc(match[2])}</span></li>`;
+    }).join('');
+  }
   function aiHTML(rec){
-    if(rec.ai_generated_at)return `<div class="ai-feedback"><div class="ai-heading"><span>AI 原作評價</span><small>${esc(rec.ai_model||(LIVE?'Gemini':'示範'))} · 只供參考</small></div><p class="ai-intro">AI 直接觀察你的原作圖片，按圖中可見細節評價及提出建議，並非整理同學評語。</p>${REVIEW_FIELDS.map((f,i)=>`<div class="ai-advice"><span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><p>${esc(rec['ai_'+f.key])}</p></div>`).join('')}<span class="side-meta">生成時間：${fmtTime(rec.ai_generated_at)}</span></div>`;
+    if(rec.ai_generated_at)return `<section class="ai-feedback"><div class="ai-heading"><span>AI 原作評價</span><small>${esc(rec.ai_model||(LIVE?'Gemini':'示範'))} · 只供參考</small></div><p class="ai-intro">AI 直接觀察原作，以點列指出圖中可見的設計表現。<span class="ai-legend effective">黑色＝有效及理想</span><span class="ai-legend improvement">紅色＝改善建議</span></p>${REVIEW_FIELDS.map((f,i)=>`<div class="ai-advice ai-advice-bullets"><span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><ul class="ai-bullet-list">${aiBullets(rec['ai_'+f.key])}</ul></div>`).join('')}<span class="side-meta">生成時間：${fmtTime(rec.ai_generated_at)}</span></section>`;
     const status=state.ai.status;
-    return `<div class="ai-feedback ai-pending"><div class="ai-heading"><span>AI 原作評價</span><small>Gemini</small></div>${status==='error'?`<p role="alert">${esc(state.ai.error||'暫時未能生成建議。')}</p><button class="outline-button small-button" data-action="retry-ai">重新生成原作評價</button>`:`<p>正在直接觀察你的原作，從融合手法、剪裁比例、視覺焦點及設計圖傳意四部分提出評價……</p><span class="side-meta">完成後會自動顯示並保存，你可以留在本頁。</span>`}</div>`;
+    return `<section class="ai-feedback ai-pending"><div class="ai-heading"><span>AI 原作評價</span><small>Gemini</small></div>${status==='error'?`<p role="alert">${esc(state.ai.error||'暫時未能生成建議。')}</p><button class="outline-button small-button" data-action="retry-ai">重新生成原作評價</button>`:`<p>正在直接觀察你的原作，從融合手法、剪裁比例、視覺焦點及設計圖傳意四部分提出評價……</p><span class="side-meta">完成後會自動顯示並保存，你可以留在本頁。</span>`}</section>`;
   }
   function improvementImageHTML(rec){
     if(!LIVE||!rec?.ai_generated_at)return '';
     if(rec.ai_image_generated_at&&rec.ai_image_path){
       const canDownload=!!state.data?.assignment?.submitted_at,working=state.studentExport.status==='working';
-      return `<section class="improvement-result" aria-labelledby="improvement-title"><div class="ai-heading"><span id="improvement-title">AI 改善效果圖</span><small>${esc(rec.ai_image_model||'Gemini')}</small></div><p class="ai-intro">以原作為基礎，綜合同學及 AI 四部分文字意見生成；請與上方原作對照，判斷哪些修改適合你的下一稿。</p><figure><img src="${esc(imageUrl(rec.ai_image_path))}" alt="根據原作及互評意見生成的 AI 改善服裝設計效果圖" loading="lazy"><figcaption>${esc(rec.ai_image_summary||'已保存 AI 改善效果圖。')}</figcaption></figure><span class="side-meta">生成時間：${fmtTime(rec.ai_image_generated_at)}</span><p class="generation-limit">本輪改善圖已完成，不能再次生成。如需另一張，請在下一輪重新上載作品並收到新的同學評價。</p><div class="student-download-actions"><a class="outline-button small-button download-image" href="${esc(imageUrl(rec.ai_image_path))}" download target="_blank" rel="noopener">只下載改善圖</a>${canDownload?`<button class="primary-button small-button" data-action="download-student-pack" ${working?'disabled':''}>${working?'正在製作 ZIP……':'下載我的評語及改善圖'}</button>`:'<small>完成你負責的同學互評後，即可下載完整個人紀錄。</small>'}</div>${state.studentExport.status==='error'?`<p class="inline-error" role="alert">${esc(state.studentExport.error)}</p>`:''}<p class="student-pack-note">個人 ZIP 包含原作、改善圖、同學及 AI 四部分文字、HTML 報告和 CSV；同學來源保持匿名。重複下載不會重新生成。</p></section>`;
+      return `<section class="improvement-result" aria-labelledby="improvement-title"><div class="ai-heading"><span id="improvement-title">AI 改善效果圖</span><small>${esc(rec.ai_image_model||'Gemini')}</small></div><p class="ai-intro">以原作為基礎，綜合同學及 AI 四部分文字意見生成；請與原作對照，判斷哪些修改適合你的下一稿。</p><figure><img src="${esc(imageUrl(rec.ai_image_path))}" alt="根據原作及互評意見生成的 AI 改善服裝設計效果圖" loading="lazy"><figcaption>${esc(rec.ai_image_summary||'已保存 AI 改善效果圖。')}</figcaption></figure><span class="side-meta">生成時間：${fmtTime(rec.ai_image_generated_at)}</span><p class="generation-limit">本輪改善圖已完成，不能再次生成。如需另一張，請在下一輪重新上載作品並收到新的同學評價。</p><div class="student-download-actions"><a class="outline-button small-button download-image" href="${esc(imageUrl(rec.ai_image_path))}" download target="_blank" rel="noopener">只下載改善圖</a>${canDownload?`<button class="primary-button small-button" data-action="download-student-pack" ${working?'disabled':''}>${working?'正在製作 ZIP……':'下載我的評語及改善圖'}</button>`:'<small>完成你負責的同學互評後，即可下載完整個人紀錄。</small>'}</div>${state.studentExport.status==='error'?`<p class="inline-error" role="alert">${esc(state.studentExport.error)}</p>`:''}<p class="student-pack-note">個人 ZIP 包含原作、改善圖、同學及 AI 四部分文字、HTML 報告和 CSV；同學來源保持匿名。重複下載不會重新生成。</p></section>`;
     }
     const key=rec.id||rec.submitted_at,current=state.aiImage.key===key?state.aiImage.status:(rec.ai_image_started_at?'waiting':'idle');
     const error=state.aiImage.key===key?state.aiImage.error:'';
     if(current==='loading'||current==='waiting')return `<section class="improvement-result ai-pending"><div class="ai-heading"><span>AI 改善效果圖</span><small>Gemini</small></div><p>正在綜合原作、同學及 AI 的文字意見，生成保留原設計特色的改善圖……</p><span class="side-meta">圖像生成需要較長時間。完成後會保存，重新整理不會自動重複生成。</span><button class="text-button" data-action="refresh-student">重新查看進度</button></section>`;
     return `<section class="improvement-result improvement-cta"><div class="ai-heading"><span>下一步：改善效果圖</span><small>由你決定何時生成</small></div><p>看完同學及 AI 意見後，讓 AI 以原作為基礎綜合建議，生成一張改善後的全身服裝設計效果圖。</p>${current==='error'?`<p class="inline-error" role="alert">${esc(error||'改善效果圖暫時未能生成。')}</p>`:''}<button class="primary-button full" data-action="generate-ai-image">${current==='error'?'重試生成改善效果圖':'生成改善效果圖'} <span>→</span></button><small>圖像生成會產生額外 Vertex AI 用量；按鈕後會再要求確認。姓名及學生編號不會傳給模型。</small></section>`;
   }
-  function sideHTML(data){
-    const art=data.my_artwork,rec=data.received;
-    const peer=rec?.submitted_at?`<div class="feedback-received"><div class="peer-heading">同學的四部分觀察</div>${REVIEW_FIELDS.map((f,i)=>`<span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><p class="feedback-quote">${esc(peerValue(rec,f.key))}</p>`).join('')}<span class="side-meta">同學已於 ${fmtTime(rec.submitted_at)} 遞交</span></div>${aiHTML(rec)}${improvementImageHTML(rec)}`:`<p class="empty-side">${art?'負責互評的同學遞交後，四部分意見及 AI 原作評價會自動出現在這裡。':'上載作品後，才有機會收到同學意見。'}</p>`;
-    return `<aside class="workspace-side"><section class="side-section"><h3>我的作品</h3>${art?`<img class="side-art" src="${esc(imageUrl(art.image_path))}" alt="我的作品：${esc(art.title)}"><h4 class="side-title">${esc(art.title)}</h4><span class="side-meta">已於 ${fmtTime(art.created_at)} 遞交</span>`:`<p class="empty-side">尚未上載作品。</p>`}</section><section class="side-section"><h3>我收到的意見</h3>${peer}</section></aside>`;
+  function receivedContent(data){
+    if(!data.assignment?.submitted_at)return reviewContent(data);
+    const rec=data.received,art=data.my_artwork;
+    if(!rec?.submitted_at)return `<div class="waiting-state"><div class="submitted-check">✓</div><h2>第二步已完成</h2><p>你的四部分意見已送達。負責評價你作品的同學遞交後，同學意見及 AI 原作評價會自動顯示在這裡。</p><span class="side-meta">無需重複遞交；你可以留在本頁或稍後回來。</span></div>`;
+    return `<div class="reflection-content">${art?`<figure class="reflection-artwork"><img src="${esc(imageUrl(art.image_path))}" alt="我的原作：${esc(art.title)}"><figcaption><strong>${esc(art.title||'我的作品')}</strong><span>我的原作 · ${fmtTime(art.created_at)} 遞交</span></figcaption></figure>`:''}<section class="feedback-received"><div class="peer-heading">同學的四部分意見</div>${REVIEW_FIELDS.map((f,i)=>`<div class="peer-response"><span class="feedback-label">${String(i+1).padStart(2,'0')} · ${esc(f.title)}</span><p class="feedback-quote">${esc(peerValue(rec,f.key))}</p></div>`).join('')}<span class="side-meta">同學已於 ${fmtTime(rec.submitted_at)} 遞交 · 來源保持匿名</span></section>${aiHTML(rec)}${improvementImageHTML(rec)}</div>`;
   }
 
   function renderStudent(){
     const d=state.data,s=state.session;if(!d)return;
     const r=d.round;let title='等待活動開始',subtitle='系統會自動更新階段',content='';
-    if(r?.status==='collecting'){if(d.my_artwork&&!state.replacing){title='等待隨機分配';subtitle='你的作品已保存';content=uploadSubmittedContent(d);}else{title='上載你的作品';subtitle='第一步 · 在時限內遞交一張圖片';content=uploadContent(d);}}
-    else if(r?.status==='reviewing'||(r?.status==='complete'&&d.assignment?.submitted_at)){title=d.assignment?.submitted_at?'互評已經完成':'為同學留下回應';subtitle=d.assignment?.submitted_at?'你的觀察已成為同學的養分':'第二步 · 具體、善意、可行';content=reviewContent(d);}
-    else{content=waitingContent(d);title=r?'本輪作品對話':'等待老師開始';subtitle=r?'已保存的內容可隨時回來查看':'請留意老師指示';}
-    $('#main').innerHTML=`<div class="app-shell"><div class="app-topline"><div><p class="eyebrow">${esc(d.class.join_code)} · ${esc(d.class.name)}</p><h1>${esc(s.name)}的作品對話</h1><p>學生編號 ${esc(s.studentNo)} · 進度自動保存</p></div><div class="user-actions"><span class="avatar">${esc(initial(s.name))}</span><button class="outline-button compact" data-action="logout">離開 <span aria-hidden="true">↗</span></button></div></div>${connectionHTML()}${errorHTML()}${progressHTML(d)}<div class="workspace"><section class="workspace-main"><div class="section-heading"><div><span class="kicker">${esc(subtitle)}</span><h2>${esc(title)}</h2></div>${timerHTML(r)}</div>${content}</section>${sideHTML(d)}</div></div>`;
+    if(r?.status==='collecting'){
+      if(d.my_artwork&&!state.replacing){title='等待隨機分配';subtitle='第一步完成 · 你的作品已保存';content=uploadSubmittedContent(d);}
+      else{title='上載你的作品';subtitle='第一步 · 在時限內遞交一張圖片';content=uploadContent(d);}
+    }else if((r?.status==='reviewing'||r?.status==='complete')&&d.assignment){
+      if(!d.assignment.submitted_at){title='為同學留下回應';subtitle='第二步 · 具體、善意、可行';content=reviewContent(d);}
+      else{title=d.received?.submitted_at?'帶着意見再出發':'等待同學回應';subtitle='第三步 · 收回意見及思考下一稿';content=receivedContent(d);}
+    }else{content=waitingContent(d);title=r?'本輪作品對話':'等待老師開始';subtitle=r?'已保存的內容可隨時回來查看':'請留意老師指示';}
+    $('#main').innerHTML=`<div class="app-shell"><div class="app-topline"><div><p class="eyebrow">${esc(d.class.join_code)} · ${esc(d.class.name)}</p><h1>${esc(s.name)}的作品對話</h1><p>學生編號 ${esc(s.studentNo)} · 進度自動保存</p></div><div class="user-actions"><span class="avatar">${esc(initial(s.name))}</span><button class="outline-button compact" data-action="logout">離開 <span aria-hidden="true">↗</span></button></div></div>${connectionHTML()}${errorHTML()}${progressHTML(d)}<div class="workspace"><section class="workspace-main"><div class="section-heading"><div><span class="kicker">${esc(subtitle)}</span><h2>${esc(title)}</h2></div>${timerHTML(r)}</div>${content}</section></div></div>`;
     updateTimer();
   }
 
@@ -578,7 +599,7 @@
     render();
     if(state.session){
       state.view=state.session.role;
-      const cached=store.get(KEYS.cache);if(state.session.role==='student'&&cached?.session?.token===state.session.token){state.data=cached.data;state.lastSignature=JSON.stringify({round:cached.data.round,art:cached.data.my_artwork,assignment:cached.data.assignment,received:cached.data.received});loadDraft();render();}
+      const cached=store.get(KEYS.cache);if(state.session.role==='student'&&cached?.session?.token===state.session.token){state.data=sanitizeStudentData(cached.data);state.lastSignature=JSON.stringify({round:state.data.round,art:state.data.my_artwork,assignment:state.data.assignment,received:state.data.received});loadDraft();render();}
       if(state.session.role==='student')await refreshStudent(true);else await refreshTeacher(true);
       restartPolling();
     }

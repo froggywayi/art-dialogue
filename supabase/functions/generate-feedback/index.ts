@@ -156,15 +156,20 @@ Deno.serve(async (req) => {
       ? detectedType
       : extension === 'png' ? 'image/png' : extension === 'webp' ? 'image/webp' : 'image/jpeg';
 
-    const prompt = `請直接觀察隨附的服裝設計原作圖片，給原作者有視覺依據的評價及下一步修改建議。
+    const prompt = `請直接觀察隨附的服裝設計原作圖片，給原作者精簡、有視覺依據的評價。
 作品名稱：${prepared.artwork_title || '同學作品'}
 
-請以繁體中文輸出四項，每項約 60–110 字：
-1. 融合手法：指出圖中傳統與現代元素的實際分布及比例是否平衡，再提出一個具體改善方向。
-2. 剪裁比例：觀察腰線、上下身比例、鬆緊或長短關係及視覺重心，再提出可執行的修改。
-3. 視覺焦點：指出圖中實際最醒目的部分、主次及留白，判斷是否有一至兩個明確焦點，再提出改善方向。
-4. 設計圖的傳意：觀察線條能否交代拼接、穿脫、材質及衣服結構，指出需要補強的標註或局部圖。
-每項必須先描述一項可從圖片看到的具體證據，再給建議；不可根據同學評語猜測，不可空泛讚美或評分。若圖片細節不足，要明確指出可見範圍的限制，不可虛構。不要提及學生身份。`;
+請以繁體中文輸出以下四項，每項只用兩個短點列，不要寫成段落：
+1. 融合手法：觀察傳統與現代元素的實際分布及比例。
+2. 剪裁比例：觀察腰線、上下身比例、鬆緊或長短關係及視覺重心。
+3. 視覺焦點：觀察最醒目的部分、主次、留白，以及是否有一至兩個明確焦點。
+4. 設計圖的傳意：觀察線條能否交代拼接、穿脫、材質及衣服結構。
+
+每一項必須嚴格使用這個格式（「融合手法」只是示例，四項都要各自輸出兩行）：
+有效｜用一句不超過 45 字的話，指出一項從圖片可見、已有效或理想的具體設計表現及視覺證據。
+改善｜用一句不超過 45 字的話，提出一項具體、可執行的改善建議；如該方面已很理想，可提出下一稿可嘗試的微調，不可無中生有。
+
+每個 JSON 欄位的字串只能有兩行，不要加上項目編號、欄位標題、引言、總結、評分、Markdown 或其他符號；每行必須以「有效｜」或「改善｜」開頭，次序是先有效、後改善。不可根據同學評語猜測，不可空泛讚美。若圖片細節不足，須在改善行明確指出可見範圍的限制及需要補充的圖示，不可虛構，也不要提及學生身份。`;
 
     const accessToken = await getGoogleAccessToken(serviceAccount);
     const vertexHost = location === 'global'
@@ -210,6 +215,11 @@ Deno.serve(async (req) => {
       if (typeof advice[key] !== 'string' || advice[key].trim().length < 2 || advice[key].length > 2000) {
         throw new Error('Gemini 回應格式不完整。');
       }
+      const lines = advice[key].trim().split(/\r?\n/).map((line: string) => line.trim()).filter(Boolean);
+      if (lines.length !== 2 || !/^有效｜\S/.test(lines[0]) || !/^改善｜\S/.test(lines[1])) {
+        throw new Error('Gemini 回應未採用有效／改善點列格式。');
+      }
+      advice[key] = lines.join('\n');
     }
 
     await rpc('save_ai_feedback', {

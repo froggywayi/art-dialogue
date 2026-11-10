@@ -208,7 +208,11 @@ begin
     )
     into v_received
     from public.reviews rv join public.artworks a on a.id=rv.artwork_id
-    where a.round_id=v_round.id and a.student_id=v_student.id and rv.submitted_at is not null;
+    where a.round_id=v_round.id and a.student_id=v_student.id and rv.submitted_at is not null
+    and exists (
+      select 1 from public.reviews own
+      where own.round_id=v_round.id and own.reviewer_id=v_student.id and own.submitted_at is not null
+    );
   end if;
   return json_build_object(
     'class',json_build_object('id',v_class.id,'name',v_class.name,'join_code',v_class.join_code,'duration_minutes',v_class.duration_minutes),
@@ -282,6 +286,10 @@ begin
   where rv.round_id=v_class.current_round_id and a.student_id=v_student.id
   for update of rv;
   if not found or v_review.submitted_at is null then raise exception '同學意見尚未遞交'; end if;
+  if not exists(
+    select 1 from public.reviews own
+    where own.round_id=v_class.current_round_id and own.reviewer_id=v_student.id and own.submitted_at is not null
+  ) then raise exception '請先完成你負責的互評'; end if;
   select a.title,a.image_path into v_title,v_image_path from public.artworks a where a.id=v_review.artwork_id;
   if v_review.ai_generated_at is not null then return json_build_object('status','already_generated'); end if;
   if v_review.ai_started_at is not null and v_review.ai_started_at>now()-interval '5 minutes' then
@@ -340,6 +348,10 @@ begin
   where rv.round_id=v_class.current_round_id and a.student_id=v_student.id
   for update of rv;
   if not found or v_review.submitted_at is null then raise exception '同學意見尚未遞交'; end if;
+  if not exists(
+    select 1 from public.reviews own
+    where own.round_id=v_class.current_round_id and own.reviewer_id=v_student.id and own.submitted_at is not null
+  ) then raise exception '請先完成你負責的互評'; end if;
   if v_review.ai_generated_at is null then raise exception '請先完成 AI 原作評價'; end if;
   select * into v_art from public.artworks where id=v_review.artwork_id;
   if v_review.ai_image_generated_at is not null then return json_build_object('status','already_generated','image_path',v_review.ai_image_path); end if;
